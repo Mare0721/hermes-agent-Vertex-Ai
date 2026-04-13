@@ -257,7 +257,13 @@ _VISION_MAX_CONCURRENCY = _resolve_max_concurrency()
 _VISION_RATE_LIMIT_BACKOFF_BASE_SECONDS = _resolve_backoff_base_seconds()
 _VISION_RATE_LIMIT_BACKOFF_MAX_SECONDS = _resolve_backoff_max_seconds()
 _VISION_RATE_LIMIT_BACKOFF_JITTER_SECONDS = _resolve_backoff_jitter_seconds()
-_VISION_CONCURRENCY_SEMAPHORE = asyncio.Semaphore(_VISION_MAX_CONCURRENCY)
+_VISION_CONCURRENCY_SEMAPHORE_CACHE: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+def _get_vision_semaphore() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    if loop not in _VISION_CONCURRENCY_SEMAPHORE_CACHE:
+        _VISION_CONCURRENCY_SEMAPHORE_CACHE[loop] = asyncio.Semaphore(_VISION_MAX_CONCURRENCY)
+    return _VISION_CONCURRENCY_SEMAPHORE_CACHE[loop]
 _VISION_ANALYSIS_MAX_TOKENS = 3000
 
 
