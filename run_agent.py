@@ -4117,6 +4117,23 @@ class AIAgent:
                 self._client_log_context(),
             )
             return client
+        if self.provider == "vertex":
+            from agent.models.vertex_ai import build_vertex_client
+
+            client = build_vertex_client(
+                api_key=client_kwargs.get("api_key", ""),
+                base_url=str(client_kwargs.get("base_url", "")),
+                default_model=self.model,
+                project_id=os.getenv("VERTEX_PROJECT_ID", ""),
+                region=os.getenv("VERTEX_REGION", "global"),
+            )
+            logger.info(
+                "Vertex AI client created (%s, shared=%s) %s",
+                reason,
+                shared,
+                self._client_log_context(),
+            )
+            return client
         client = OpenAI(**client_kwargs)
         logger.info(
             "OpenAI client created (%s, shared=%s) %s",
