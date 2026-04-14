@@ -730,6 +730,45 @@ def _build_vertex_tools(tools: Any) -> List[Dict[str, Any]]:
     return [{"functionDeclarations": declarations}]
 
 
+def _build_vertex_native_search_tool(kwargs: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    tool_choice = kwargs.get("tool_choice")
+    if isinstance(tool_choice, str) and tool_choice.strip().lower() == "none":
+        return None
+
+    containers: List[Dict[str, Any]] = [kwargs]
+    extra_body = kwargs.get("extra_body")
+    if isinstance(extra_body, dict):
+        containers.append(extra_body)
+
+    for container in containers:
+        if "googleSearch" in container:
+            value = container.get("googleSearch")
+            if value is False:
+                return None
+            if value is True or value is None:
+                return {"googleSearch": {}}
+            if isinstance(value, dict):
+                return {"googleSearch": dict(value)}
+
+        if "googleSearchRetrieval" in container:
+            value = container.get("googleSearchRetrieval")
+            if value is False:
+                return None
+            if value is True or value is None:
+                return {"googleSearchRetrieval": {}}
+            if isinstance(value, dict):
+                return {"googleSearchRetrieval": dict(value)}
+
+    for container in containers:
+        web_search = container.get("web_search")
+        if web_search is True:
+            return {"googleSearch": {}}
+        if web_search is False:
+            return None
+
+    return None
+
+
 def _build_tool_config(tool_choice: Any) -> Optional[Dict[str, Any]]:
     if tool_choice is None:
         return None
@@ -792,8 +831,12 @@ def _build_vertex_payload(messages: List[Dict[str, Any]], kwargs: Dict[str, Any]
         payload["systemInstruction"] = system_instruction
 
     tools = _build_vertex_tools(kwargs.get("tools"))
-    if tools:
-        payload["tools"] = tools
+    native_search_tool = _build_vertex_native_search_tool(kwargs)
+    if tools or native_search_tool:
+        payload_tools = list(tools) if tools else []
+        if native_search_tool:
+            payload_tools.append(native_search_tool)
+        payload["tools"] = payload_tools
 
     tool_config = _build_tool_config(kwargs.get("tool_choice"))
     if tool_config:

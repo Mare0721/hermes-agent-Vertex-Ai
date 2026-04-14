@@ -44,7 +44,7 @@ class _FakeOpenAI:
         pass
 
 
-def _make_agent(monkeypatch, provider, api_mode="chat_completions", base_url="https://openrouter.ai/api/v1", model=None):
+def _make_agent(monkeypatch, provider, api_mode="chat_completions", base_url="https://openrouter.ai/api/v1", model=""):
     monkeypatch.setattr("run_agent.get_tool_definitions", lambda **kw: _tool_defs("web_search", "terminal"))
     monkeypatch.setattr("run_agent.check_toolset_requirements", lambda: {})
     monkeypatch.setattr("run_agent.OpenAI", _FakeOpenAI)
@@ -53,13 +53,12 @@ def _make_agent(monkeypatch, provider, api_mode="chat_completions", base_url="ht
         base_url=base_url,
         provider=provider,
         api_mode=api_mode,
+        model=model,
         max_iterations=4,
         quiet_mode=True,
         skip_context_files=True,
         skip_memory=True,
     )
-    if model:
-        kwargs["model"] = model
     return AIAgent(**kwargs)
 
 
@@ -156,6 +155,39 @@ class TestBuildApiKwargsOpenRouter:
         anthropic_agent = _make_agent(monkeypatch, "openrouter")
         anthropic_agent.api_mode = "anthropic_messages"
         assert anthropic_agent._should_sanitize_tool_calls() is True
+
+
+class TestBuildApiKwargsVertex:
+    _VERTEX_BASE_URL = (
+        "https://aiplatform.googleapis.com/v1/projects/test-project/"
+        "locations/global/publishers/google/models"
+    )
+
+    def test_vertex_defaults_to_google_search_for_gemini_2(self, monkeypatch):
+        agent = _make_agent(
+            monkeypatch,
+            "vertex",
+            base_url=self._VERTEX_BASE_URL,
+            model="gemini-2.5-pro",
+        )
+
+        kwargs = agent._build_api_kwargs([{"role": "user", "content": "hi"}])
+
+        assert kwargs["extra_body"]["googleSearch"] == {}
+
+    def test_vertex_defaults_to_google_search_retrieval_for_gemini_15(self, monkeypatch):
+        agent = _make_agent(
+            monkeypatch,
+            "vertex",
+            base_url=self._VERTEX_BASE_URL,
+            model="gemini-1.5-pro",
+        )
+
+        kwargs = agent._build_api_kwargs([{"role": "user", "content": "hi"}])
+
+        retrieval = kwargs["extra_body"]["googleSearchRetrieval"]
+        assert retrieval["dynamicRetrievalConfig"]["mode"] == "MODE_DYNAMIC"
+        assert retrieval["dynamicRetrievalConfig"]["dynamicThreshold"] == 0.3
 
 
 class TestDeveloperRoleSwap:

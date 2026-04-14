@@ -6343,6 +6343,21 @@ class AIAgent:
         if self._is_qwen_portal():
             extra_body["vl_high_resolution_images"] = True
 
+        if self.provider == "vertex":
+            _vertex_model = (self.model or "").lower()
+            if "gemini-1.5" in _vertex_model:
+                extra_body.setdefault(
+                    "googleSearchRetrieval",
+                    {
+                        "dynamicRetrievalConfig": {
+                            "mode": "MODE_DYNAMIC",
+                            "dynamicThreshold": 0.3,
+                        }
+                    },
+                )
+            else:
+                extra_body.setdefault("googleSearch", {})
+
         if extra_body:
             api_kwargs["extra_body"] = extra_body
 
