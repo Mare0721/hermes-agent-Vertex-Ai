@@ -144,6 +144,14 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         api_key_env_vars=("GOOGLE_API_KEY", "GEMINI_API_KEY"),
         base_url_env_var="GEMINI_BASE_URL",
     ),
+    "vertex": ProviderConfig(
+        id="vertex",
+        name="Google Vertex AI",
+        auth_type="api_key",
+        inference_base_url="https://aiplatform.googleapis.com/v1",
+        api_key_env_vars=("VERTEX_API_KEY",),
+        base_url_env_var="VERTEX_BASE_URL",
+    ),
     "zai": ProviderConfig(
         id="zai",
         name="Z.AI / GLM",
@@ -906,6 +914,7 @@ def resolve_provider(
     _PROVIDER_ALIASES = {
         "glm": "zai", "z-ai": "zai", "z.ai": "zai", "zhipu": "zai",
         "google": "gemini", "google-gemini": "gemini", "google-ai-studio": "gemini",
+        "vertex-ai": "vertex", "google-vertex": "vertex", "google-vertex-ai": "vertex",
         "kimi": "kimi-coding", "kimi-for-coding": "kimi-coding", "moonshot": "kimi-coding",
         "kimi-cn": "kimi-coding-cn", "moonshot-cn": "kimi-coding-cn",
         "arcee-ai": "arcee", "arceeai": "arcee",

@@ -162,6 +162,14 @@ class TestResolveProvider:
     def test_explicit_ai_gateway(self):
         assert resolve_provider("ai-gateway") == "ai-gateway"
 
+    def test_explicit_vertex(self):
+        assert resolve_provider("vertex") == "vertex"
+
+    def test_alias_vertex_ai(self):
+        assert resolve_provider("vertex-ai") == "vertex"
+        assert resolve_provider("google-vertex") == "vertex"
+        assert resolve_provider("google-vertex-ai") == "vertex"
+
     def test_alias_glm(self):
         assert resolve_provider("glm") == "zai"
 
