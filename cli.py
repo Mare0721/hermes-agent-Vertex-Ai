@@ -3640,7 +3640,9 @@ class HermesCLI:
 
     def _preprocess_videos_with_transcription(self, text: str, videos: list, *, announce: bool = True) -> str:
         """Extract speech context from attached videos and prepend it to text."""
+        import asyncio as _asyncio
         from tools.transcription_tools import transcribe_audio
+        from tools.video_enrichment import summarize_video_visual_context
 
         enriched_parts = []
         for video_path in videos:
@@ -3650,6 +3652,35 @@ class HermesCLI:
             size_mb = video_path.stat().st_size / (1024 * 1024)
             if announce:
                 _cprint(f"  {_DIM}🎬 analyzing {video_path.name} ({size_mb:.1f}MB)...{_RST}")
+
+            try:
+                visual_result = _asyncio.run(
+                    summarize_video_visual_context(str(video_path))
+                )
+                if visual_result.get("success"):
+                    visual_summary = (visual_result.get("summary") or "").strip()
+                    if visual_summary:
+                        enriched_parts.append(
+                            f"[The user attached a video file: {video_path}. "
+                            f"Sampled visual context:\n{visual_summary}]"
+                        )
+                        if announce:
+                            _cprint(f"  {_DIM}✓ video frames analyzed{_RST}")
+                else:
+                    visual_error = visual_result.get("error", "frame analysis unavailable")
+                    enriched_parts.append(
+                        f"[The user attached a video file at {video_path}, but "
+                        f"automatic frame-based visual analysis was unavailable ({visual_error}).]"
+                    )
+                    if announce:
+                        _cprint(f"  {_DIM}⚠ video frame analysis unavailable — path included for retry{_RST}")
+            except Exception as e:
+                enriched_parts.append(
+                    f"[The user attached a video file at {video_path}, but "
+                    f"visual frame analysis failed ({e}).]"
+                )
+                if announce:
+                    _cprint(f"  {_DIM}⚠ video frame analysis error — path included for retry{_RST}")
 
             try:
                 result = transcribe_audio(str(video_path))
