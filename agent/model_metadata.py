@@ -5,6 +5,7 @@ and run_agent.py for pre-flight context checks.
 """
 
 import logging
+import os
 import re
 import time
 from pathlib import Path
@@ -23,19 +24,18 @@ logger = logging.getLogger(__name__)
 # are preserved so the full model name reaches cache lookups and server queries.
 _PROVIDER_PREFIXES: frozenset[str] = frozenset({
     "openrouter", "nous", "openai-codex", "copilot", "copilot-acp",
-    "gemini", "zai", "kimi-coding", "kimi-coding-cn", "minimax", "minimax-cn", "anthropic", "deepseek",
+    "gemini", "vertex", "zai", "kimi-coding", "minimax", "minimax-cn", "anthropic", "deepseek",
     "opencode-zen", "opencode-go", "ai-gateway", "kilocode", "alibaba",
     "qwen-oauth",
     "xiaomi",
-    "arcee",
     "custom", "local",
     # Common aliases
     "google", "google-gemini", "google-ai-studio",
+    "vertex-ai", "google-vertex", "google-vertex-ai",
     "glm", "z-ai", "z.ai", "zhipu", "github", "github-copilot",
-    "github-models", "kimi", "moonshot", "kimi-cn", "moonshot-cn", "claude", "deep-seek",
+    "github-models", "kimi", "moonshot", "claude", "deep-seek",
     "opencode", "zen", "go", "vercel", "kilo", "dashscope", "aliyun", "qwen",
     "mimo", "xiaomi-mimo",
-    "arcee-ai", "arceeai",
     "qwen-portal",
 })
 
@@ -106,17 +106,15 @@ DEFAULT_CONTEXT_LENGTHS = {
     "claude-sonnet-4.6": 1000000,
     # Catch-all for older Claude models (must sort after specific entries)
     "claude": 200000,
-    # OpenAI — GPT-5 family (most have 400k; specific overrides first)
-    # Source: https://developers.openai.com/api/docs/models
-    "gpt-5.4-nano": 400000,           # 400k (not 1.05M like full 5.4)
-    "gpt-5.4-mini": 400000,           # 400k (not 1.05M like full 5.4)
-    "gpt-5.4": 1050000,               # GPT-5.4, GPT-5.4 Pro (1.05M context)
-    "gpt-5.3-codex-spark": 128000,    # Spark variant has reduced 128k context
-    "gpt-5.1-chat": 128000,           # Chat variant has 128k context
-    "gpt-5": 400000,                  # GPT-5.x base, mini, codex variants (400k)
+    # OpenAI
     "gpt-4.1": 1047576,
+    "gpt-5": 128000,
     "gpt-4": 128000,
     # Google
+    # Gemini 3.1 Pro supports a 2M context window. Keep this explicit key
+    # above the generic "gemini" fallback and use longest-key matching.
+    "gemini-3.1-pro-preview": 2097152,
+    "gemini-3.1-pro": 2097152,
     "gemini": 1048576,
     # Gemma (open models served via AI Studio)
     "gemma-4-31b": 256000,
@@ -172,6 +170,14 @@ DEFAULT_CONTEXT_LENGTHS = {
     "zai-org/GLM-5": 202752,
 }
 
+# Hard overrides for model families where upstream registries can lag or
+# provider surfaces report inconsistent values. These are checked before
+# models.dev/OpenRouter metadata.
+_HARD_CONTEXT_OVERRIDES = {
+    "gemini-3.1-pro-preview": 2097152,
+    "gemini-3.1-pro": 2097152,
+}
+
 _CONTEXT_LENGTH_KEYS = (
     "context_length",
     "context_window",
@@ -220,15 +226,15 @@ _URL_TO_PROVIDER: Dict[str, str] = {
     "api.anthropic.com": "anthropic",
     "api.z.ai": "zai",
     "api.moonshot.ai": "kimi-coding",
-    "api.moonshot.cn": "kimi-coding-cn",
     "api.kimi.com": "kimi-coding",
-    "api.arcee.ai": "arcee",
     "api.minimax": "minimax",
     "dashscope.aliyuncs.com": "alibaba",
     "dashscope-intl.aliyuncs.com": "alibaba",
     "portal.qwen.ai": "qwen-oauth",
     "openrouter.ai": "openrouter",
     "generativelanguage.googleapis.com": "gemini",
+    "aiplatform.googleapis.com": "vertex",
+    "-aiplatform.googleapis.com": "vertex",
     "inference-api.nousresearch.com": "nous",
     "api.deepseek.com": "deepseek",
     "api.githubcopilot.com": "copilot",
@@ -786,12 +792,12 @@ def _query_local_context_length(model: str, base_url: str) -> Optional[int]:
                 resp = client.post(f"{server_url}/api/show", json={"name": model})
                 if resp.status_code == 200:
                     data = resp.json()
-                    # Prefer explicit num_ctx from Modelfile parameters: this is
-                    # the *runtime* context Ollama will actually allocate KV cache
-                    # for. The GGUF model_info.context_length is the training max,
-                    # which can be larger than num_ctx — using it here would let
-                    # Hermes grow conversations past the runtime limit and Ollama
-                    # would silently truncate. Matches query_ollama_num_ctx().
+                    # Check model_info for context length
+                    model_info = data.get("model_info", {})
+                    for key, value in model_info.items():
+                        if "context_length" in key and isinstance(value, (int, float)):
+                            return int(value)
+                    # Check parameters string for num_ctx
                     params = data.get("parameters", "")
                     if "num_ctx" in params:
                         for line in params.split("\n"):
@@ -802,11 +808,6 @@ def _query_local_context_length(model: str, base_url: str) -> Optional[int]:
                                         return int(parts[-1])
                                     except ValueError:
                                         pass
-                    # Fall back to GGUF model_info context_length (training max)
-                    model_info = data.get("model_info", {})
-                    for key, value in model_info.items():
-                        if "context_length" in key and isinstance(value, (int, float)):
-                            return int(value)
 
             # LM Studio native API: /api/v1/models returns max_context_length.
             # This is more reliable than the OpenAI-compat /v1/models which
@@ -1011,7 +1012,15 @@ def get_model_context_length(
         if ctx:
             return ctx
 
-    # 5. Provider-aware lookups (before generic OpenRouter cache)
+    # 5. Hard overrides for known model IDs with stable documented limits.
+    model_lower = model.lower()
+    for override_model, override_len in sorted(
+        _HARD_CONTEXT_OVERRIDES.items(), key=lambda x: len(x[0]), reverse=True
+    ):
+        if override_model in model_lower:
+            return override_len
+
+    # 6. Provider-aware lookups (before generic OpenRouter cache)
     # These are provider-specific and take priority over the generic OR cache,
     # since the same model can have different context limits per provider
     # (e.g. claude-opus-4.6 is 1M on Anthropic but 128K on GitHub Copilot).
@@ -1033,7 +1042,7 @@ def get_model_context_length(
         if ctx:
             return ctx
 
-    # 6. OpenRouter live API metadata (provider-unaware fallback)
+    # 7. OpenRouter live API metadata (provider-unaware fallback)
     metadata = fetch_model_metadata()
     if model in metadata:
         return metadata[model].get("context_length", 128000)
