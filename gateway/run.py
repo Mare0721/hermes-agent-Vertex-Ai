@@ -3303,6 +3303,10 @@ class GatewayRunner:
                     for path in video_paths
                 )
                 message_text = f"{_video_context}\n\n{message_text}" if message_text else _video_context
+                message_text = await self._enrich_message_with_video_visual_context(
+                    message_text,
+                    video_paths,
+                )
                 message_text = await self._enrich_message_with_transcription(
                     message_text,
                     video_paths,
@@ -7429,6 +7433,47 @@ class GatewayRunner:
                 )
 
         # Combine: vision descriptions first, then the user's original text
+        if enriched_parts:
+            prefix = "\n\n".join(enriched_parts)
+            if user_text:
+                return f"{prefix}\n\n{user_text}"
+            return prefix
+        return user_text
+
+    async def _enrich_message_with_video_visual_context(
+        self,
+        user_text: str,
+        video_paths: List[str],
+    ) -> str:
+        """Sample key video frames and prepend visual observations to message text."""
+        from tools.video_enrichment import summarize_video_visual_context
+
+        enriched_parts = []
+        for path in video_paths:
+            try:
+                logger.debug("Auto-analyzing user video frames: %s", path)
+                result = await summarize_video_visual_context(path)
+                if result.get("success"):
+                    summary = (result.get("summary") or "").strip()
+                    if summary:
+                        enriched_parts.append(
+                            "[The user sent a video file. "
+                            f"Sampled visual context from key frames:\n{summary}]"
+                        )
+                    continue
+
+                error = result.get("error", "frame analysis unavailable")
+                enriched_parts.append(
+                    "[The user sent a video file, but automatic frame-based visual "
+                    f"analysis was unavailable ({error}).]"
+                )
+            except Exception as e:
+                logger.error("Video visual auto-analysis error: %s", e)
+                enriched_parts.append(
+                    "[The user sent a video file, but something went wrong when I "
+                    "tried to sample visual frames.]"
+                )
+
         if enriched_parts:
             prefix = "\n\n".join(enriched_parts)
             if user_text:
