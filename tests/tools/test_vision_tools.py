@@ -28,7 +28,6 @@ from tools.vision_tools import (
     _RESIZE_TARGET_BYTES,
     vision_analyze_tool,
     check_vision_requirements,
-    get_debug_session_info,
 )
 
 
@@ -477,7 +476,7 @@ class TestVisionSafetyGuards:
 
 
 # ---------------------------------------------------------------------------
-# check_vision_requirements & get_debug_session_info
+# check_vision_requirements
 # ---------------------------------------------------------------------------
 
 

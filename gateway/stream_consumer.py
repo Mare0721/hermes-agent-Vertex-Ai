@@ -280,6 +280,14 @@ class GatewayStreamConsumer:
                     await self._send_or_edit(self._accumulated)
                 except Exception:
                     pass
+            # If we delivered any content before being cancelled, mark the
+            # final response as sent so the gateway's already_sent check
+            # doesn't trigger a duplicate message.  The 5-second
+            # stream_task timeout (gateway/run.py) can cancel us while
+            # waiting on a slow Telegram API call — without this flag the
+            # gateway falls through to the normal send path.
+            if self._already_sent:
+                self._final_response_sent = True
         except Exception as e:
             logger.error("Stream consumer error: %s", e)
 
@@ -491,6 +499,13 @@ class GatewayStreamConsumer:
         # Media files are delivered as native attachments after the stream
         # finishes (via _deliver_media_from_response in gateway/run.py).
         text = self._clean_for_display(text)
+        # A bare streaming cursor is not meaningful user-visible content and
+        # can render as a stray tofu/white-box message on some clients.
+        visible_without_cursor = text
+        if self.cfg.cursor:
+            visible_without_cursor = visible_without_cursor.replace(self.cfg.cursor, "")
+        if not visible_without_cursor.strip():
+            return True  # cursor-only / whitespace-only update
         if not text.strip():
             return True  # nothing to send is "success"
         try:
