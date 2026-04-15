@@ -1,90 +1,72 @@
-# Vertex 稳定性更新总结（2026-04-15）
+# 本分支相对原版 main 的差异说明
 
-## 范围
-本文档汇总了本轮 Vertex 稳定性修复中新增与修改的内容，以及已执行的标准发布流程。
+## 文档用途
+本文件只回答一个问题：
+和原版 main 相比，这个分支多支持了什么。
 
-## 目标
-- 在首次 429 时立即轮换凭证。
-- 避免全部凭证临时 exhausted 时导致运行时启动失败。
-- 在会话级模型覆盖后继续保持 credential pool 生效。
-- 确保日用运行环境与测试通过代码保持同步。
+目标分支：adapt/vertex-feature-20260415-1-sync-20260415
+对比基线：main
 
-## 代码变更
+## 相比原版新增支持能力
 
-### 1）首次 429 立即轮换
-- 文件：run_agent.py
-- 变更：
-  - 在 _recover_with_credential_pool 中，首次 429 改为立即轮换。
-  - 移除了“首次 429 仅重试当前凭证”的旧行为。
-- 结果：
-  - 限流场景下故障切换更快。
+### 1）Vertex Provider 全链路支持
+- 在 provider 和 model 选择流程中注册 Vertex。
+- 增加 Vertex 的别名与模型路由兼容处理。
+- 扩展认证与运行时解析流程，使 Vertex 能在实际运行中被完整识别和使用。
+- 支持按 key 绑定 base_url，可将不同 key 路由到不同的 Vertex 项目和区域。
 
-### 2）全 exhausted 场景运行时兜底
-- 文件：agent/credential_pool.py
-- 新增：
-  - select_with_exhausted_fallback()
-  - _select_exhausted_fallback_unlocked(...)
-- 行为更新：
-  - 当全部凭证处于 exhausted 冷却时，不再直接返回无 key，而是继续选择一个凭证用于应急。
-  - 应急选择遵循配置策略（random、round_robin、least_used、fill_first）。
-  - 轮换路径在有候选时会尽量避开当前刚 exhausted 的同一凭证。
+### 2）凭证池轮换与容错增强
+- 首次 429 直接轮换，不再先重试当前 key。
+- 全部凭证 exhausted 时仍可选择应急凭证，避免直接无 key。
+- exhausted fallback 遵循配置策略：
+  - random
+  - round_robin
+  - least_used
+  - fill_first
+- 轮换时在有候选的情况下尽量避免原地回到同一 exhausted 凭证。
 
-### 3）运行时 Provider 解析防护
-- 文件：hermes_cli/runtime_provider.py
-- 变更：
-  - 当 pool.select() 返回 None 时，运行时会尝试 exhausted fallback 选择。
-- 结果：
-  - 避免全部凭证冷却时出现 no API key found 启动报错。
+### 3）会话覆盖场景下的运行时稳定性增强
+- 运行时 provider 解析在 pool.select() 无可用项时可走 fallback。
+- 会话模型覆盖路径会保留并补齐 provider 对应 credential_pool。
+- 结果：会话级模型切换后，凭证轮换能力不再丢失。
 
-### 4）会话覆盖仍保留凭证池路由
-- 文件：gateway/run.py
-- 新增：
-  - _load_provider_credential_pool(provider) 辅助函数。
-- 更新：
-  - 会话覆盖状态现在会保存并传递 credential_pool。
-  - fast-path 与后台路径在缺失时会补齐对应 provider 的 pool。
-- 结果：
-  - 会话模型覆盖后不再丢失轮换能力。
+### 4）Gateway 媒体处理能力扩展
+- 改进多平台网关适配器中的媒体/文档处理路径。
+- 增加视频输入的抽帧视觉增强能力。
+- 同步完善相关状态与平台行为覆盖。
 
-### 5）测试更新
-- 涉及文件：
-  - tests/run_agent/test_run_agent.py
-  - tests/agent/test_credential_pool_routing.py
-  - tests/hermes_cli/test_runtime_provider_resolution.py
-  - tests/agent/test_credential_pool.py
-  - tests/gateway/test_session_model_override_routing.py
-- 覆盖内容：
-  - 首次 429 立即轮换。
-  - 运行时 exhausted fallback。
-  - exhausted fallback 的策略一致性。
-  - 会话覆盖路径的 credential-pool 补齐。
-  - codex reset timestamp 场景用例稳定性修正。
+### 5）测试覆盖补齐
+- 新增/更新以下能力的回归测试：
+  - 首次 429 立即轮换
+  - 全 exhausted fallback 选择
+  - 运行时 provider fallback
+  - 会话覆盖与 credential_pool 补齐
+  - gateway 媒体/文档处理路径
 
-## 日用运行环境已执行修复
-- 同步缺失模块 agent/models/vertex_ai.py。
-- 修复 /root/.hermes/auth.json 中 Vertex 占位 key（k1/k2），恢复为真实 key。
-- 将测试通过版 run_agent.py 同步到日用仓。
-- 同步后重启 gateway 服务。
+## 主要改动区域
+- 核心运行时与故障切换：
+  - run_agent.py
+  - agent/credential_pool.py
+  - hermes_cli/runtime_provider.py
+  - gateway/run.py
+- Provider/Auth/Model 接线：
+  - hermes_cli/auth.py
+  - hermes_cli/auth_commands.py
+  - hermes_cli/models.py
+  - hermes_cli/main.py
+- Gateway 平台适配：
+  - gateway/platforms/telegram.py
+  - gateway/platforms/slack.py
+  - gateway/platforms/discord.py
+  - gateway/platforms/base.py
+- 测试：
+  - tests/agent/*
+  - tests/gateway/*
+  - tests/hermes_cli/*
+  - tests/run_agent/*
 
-## 已执行的标准发布流程
-1. 在测试仓验证代码变更。
-2. 运行针对性回归测试。
-3. 提交并推送到远端分支。
-4. 将测试通过的关键运行文件回灌到日用仓。
-5. 重启 gateway 并确认服务在线。
-
-## 验证结果
-- 针对性回归测试：354 passed。
-- key 修复后运行时检查：
-  - Vertex 凭证池可解析到真实长度 key（非占位值）。
-- 网关状态：
-  - 最终重启后服务处于 active running。
-
-## 本轮关键提交
-- cf4b8b5e - fix(gateway): keep credential pool on session overrides
-- ffae63c2 - docs: add vertex stability rollout summary readme
-
-## 说明
-- 根目录 README.md 未被修改。
-- 英文总结位于 docs/readme.md。
-- 中文版本位于 docs/zh/readme.md。
+## 一句话总结
+相比原版 main，这个分支重点提供了：
+1. 可实用的 Vertex 全链路支持。
+2. 更强的凭证池轮换与 exhausted 容错。
+3. 更完整的网关媒体能力与回归测试保障。

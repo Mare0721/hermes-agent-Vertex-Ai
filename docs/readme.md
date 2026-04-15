@@ -1,89 +1,70 @@
-# Vertex Stability Update Summary (2026-04-15)
+# Branch Delta From Main
 
-## Scope
-This document summarizes all additions and modifications made in the latest Vertex stability cycle, plus the standard rollout steps that were executed.
+## Purpose
+This document highlights what this branch adds compared with upstream main.
+Target branch: adapt/vertex-feature-20260415-1-sync-20260415
+Baseline: main
 
-## Goals
-- Rotate credentials immediately on first 429.
-- Prevent runtime startup failure when all credentials are temporarily exhausted.
-- Keep provider credential pool active even after `/model` session override.
-- Ensure daily-use runtime is synced with tested code.
+## What This Branch Supports Beyond Main
 
-## Code Changes
+### 1) Vertex Provider End-to-End Support
+- Registers Vertex in provider/model selection paths.
+- Adds Vertex alias handling in model flow.
+- Extends auth flow so Vertex can be configured and resolved in runtime.
+- Supports per-key base URL binding, allowing different keys to target different Vertex projects/locations.
 
-### 1) Immediate 429 Rotation
-- File: `run_agent.py`
-- Change:
-  - In `_recover_with_credential_pool`, first 429 now rotates immediately.
-  - Removed previous behavior where first 429 only retried current credential.
-- Result:
-  - Faster failover under rate limiting.
+### 2) Credential Pool Failover Improvements
+- First 429 now rotates credentials immediately.
+- When all pool entries are exhausted, runtime can still select an emergency fallback entry.
+- Exhausted fallback follows configured pool strategy:
+  - random
+  - round_robin
+  - least_used
+  - fill_first
+- Rotation avoids staying on the same exhausted entry when alternatives exist.
 
-### 2) Exhausted-Pool Runtime Fallback
-- File: `agent/credential_pool.py`
-- Added:
-  - `select_with_exhausted_fallback()`
-  - `_select_exhausted_fallback_unlocked(...)`
-- Updated behavior:
-  - If all credentials are exhausted, fallback still selects one credential instead of returning no key.
-  - Fallback selection follows configured pool strategy (`random`, `round_robin`, `least_used`, `fill_first`).
-  - Rotation path avoids selecting the same exhausted credential when alternatives exist.
+### 3) Runtime Stability For Vertex Sessions
+- Runtime provider resolution now falls back when pool.select() returns no available entry.
+- Session model override path keeps and hydrates provider credential_pool.
+- Result: model overrides no longer silently disable rotation behavior.
 
-### 3) Runtime Provider Resolution Guard
-- File: `hermes_cli/runtime_provider.py`
-- Change:
-  - When `pool.select()` returns `None`, runtime now attempts exhausted fallback selection.
-- Result:
-  - Prevents startup-time "no API key found" when every entry is in cooldown.
+### 4) Gateway Media Handling Expansion
+- Improves cross-platform media/document handling in gateway adapters.
+- Adds frame-based visual enrichment for video inputs.
+- Updates related gateway status and platform behavior coverage.
 
-### 4) Session Override Keeps Pool Routing
-- File: `gateway/run.py`
-- Added:
-  - `_load_provider_credential_pool(provider)` helper.
-- Updated:
-  - Session override state now stores and propagates `credential_pool`.
-  - Fast-path and background-path agent creation hydrate provider-scoped pool if missing.
-- Result:
-  - `/model` override no longer disables credential rotation.
+### 5) Test Coverage Added For New Behavior
+- Adds and updates tests for:
+  - immediate 429 rotation
+  - exhausted-pool fallback selection
+  - runtime provider fallback behavior
+  - session override + credential_pool hydration
+  - gateway media/document handling paths
 
-### 5) Test Updates
-- Files:
-  - `tests/run_agent/test_run_agent.py`
-  - `tests/agent/test_credential_pool_routing.py`
-  - `tests/hermes_cli/test_runtime_provider_resolution.py`
-  - `tests/agent/test_credential_pool.py`
-  - `tests/gateway/test_session_model_override_routing.py`
-- Added/updated coverage for:
-  - Immediate rotation on first 429.
-  - Exhausted fallback in runtime resolution.
-  - Strategy-respecting exhausted fallback.
-  - Session override credential-pool hydration.
-  - Stable codex reset-timestamp test fixture source (`device_code`).
+## Changed Areas At A Glance
+- Core runtime and failover:
+  - run_agent.py
+  - agent/credential_pool.py
+  - hermes_cli/runtime_provider.py
+  - gateway/run.py
+- Provider/auth/model wiring:
+  - hermes_cli/auth.py
+  - hermes_cli/auth_commands.py
+  - hermes_cli/models.py
+  - hermes_cli/main.py
+- Gateway platform adapters:
+  - gateway/platforms/telegram.py
+  - gateway/platforms/slack.py
+  - gateway/platforms/discord.py
+  - gateway/platforms/base.py
+- Regression tests:
+  - tests/agent/*
+  - tests/gateway/*
+  - tests/hermes_cli/*
+  - tests/run_agent/*
 
-## Operational Fixes Applied in Daily Runtime
-- Synced missing module `agent/models/vertex_ai.py`.
-- Restored valid Vertex keys in `/root/.hermes/auth.json` (replaced placeholder `k1`/`k2`).
-- Synced tested `run_agent.py` into daily repo.
-- Restarted gateway service after sync.
-
-## Standard Rollout Steps Executed
-1. Validate changes in test repo.
-2. Run targeted regression tests.
-3. Commit and push to remote branch.
-4. Sync tested runtime files back to daily-use repo.
-5. Restart gateway service and verify active state.
-
-## Verification
-- Targeted test run:
-  - `354 passed`
-- Runtime checks after key restore:
-  - Vertex pool entries resolve with real key lengths (non-placeholder).
-- Gateway status:
-  - Service active after final restart.
-
-## New Commit in This Final Stabilization Step
-- `cf4b8b5e` - `fix(gateway): keep credential pool on session overrides`
-
-## Notes
-- Existing root `README.md` was not modified.
-- This document is intentionally placed at `docs/readme.md` to avoid naming conflict.
+## Quick Reader Summary
+Compared with main, this branch mainly delivers three things:
+1. Practical Vertex support in real runtime flows.
+2. Stronger credential-pool rotation and exhausted fallback behavior.
+3. Better gateway media handling with additional regression coverage.
