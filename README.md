@@ -57,11 +57,11 @@
   - tests/run_agent/*
 
 
-相比原版 main，这个分支重点提供了：
-1. 可实用的 Vertex Ai 全链路支持。
+## 总结
+相比原版主要提供了：
+1. 可实用的 Vertex Ai全链路支持。
 2. 更强的凭证池轮换与 exhausted 容错。
 3. 更完整的网关媒体能力。
-4. 仅为Gemini适配
 
 目标分支：adapt/vertex-feature-20260415-1-sync-20260415
 对比基线：main
