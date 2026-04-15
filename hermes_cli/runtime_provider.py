@@ -706,6 +706,10 @@ def resolve_runtime_provider(
         pool = None
     if pool and pool.has_credentials():
         entry = pool.select()
+        if entry is None:
+            fallback_selector = getattr(pool, "select_with_exhausted_fallback", None)
+            if callable(fallback_selector):
+                entry = fallback_selector()
         pool_api_key = ""
         if entry is not None:
             pool_api_key = (

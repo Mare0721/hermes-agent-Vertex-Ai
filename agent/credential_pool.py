@@ -770,6 +770,40 @@ class CredentialPool:
         with self._lock:
             return self._select_unlocked()
 
+    def select_with_exhausted_fallback(self) -> Optional[PooledCredential]:
+        """Select a credential, falling back to an exhausted one if necessary.
+
+        This keeps runtime initialization from failing with "no API key found"
+        when every pooled credential is temporarily cooling down.
+        """
+        with self._lock:
+            selected = self._select_unlocked()
+            if selected is not None:
+                return selected
+            if not self._entries:
+                return None
+
+            now = time.time()
+
+            def _cooldown_until(entry: PooledCredential) -> float:
+                until = _exhausted_until(entry)
+                if until is None:
+                    return 0.0
+                return float(until)
+
+            fallback = min(
+                self._entries,
+                key=lambda entry: (_cooldown_until(entry), entry.priority),
+            )
+            self._current_id = fallback.id
+            remaining = max(0.0, _cooldown_until(fallback) - now)
+            logger.warning(
+                "credential pool: all entries exhausted; using %s as emergency fallback (cooldown %.1fs)",
+                fallback.label or fallback.id[:8],
+                remaining,
+            )
+            return fallback
+
     def _available_entries(self, *, clear_expired: bool = False, refresh: bool = False) -> List[PooledCredential]:
         """Return entries not currently in exhaustion cooldown.
 
