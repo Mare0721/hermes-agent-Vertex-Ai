@@ -4144,14 +4144,30 @@ class AIAgent:
             )
             return client
         if self.provider == "vertex":
-            from agent.models.vertex_ai import build_vertex_client
+            from agent.models.vertex_ai import build_vertex_client, _parse_project_and_region_from_base_url
+
+            vertex_base_url = str(client_kwargs.get("base_url", ""))
+            vertex_project_id = os.getenv("VERTEX_PROJECT_ID", "")
+            vertex_region = os.getenv("VERTEX_REGION", "global")
+
+            try:
+                parsed_project, parsed_region = _parse_project_and_region_from_base_url(vertex_base_url)
+            except Exception:
+                parsed_project, parsed_region = "", ""
+
+            # Per-credential Vertex endpoints in auth.json encode project/region
+            # and should override global env defaults.
+            if parsed_project:
+                vertex_project_id = parsed_project
+            if parsed_region:
+                vertex_region = parsed_region
 
             client = build_vertex_client(
                 api_key=client_kwargs.get("api_key", ""),
-                base_url=str(client_kwargs.get("base_url", "")),
+                base_url=vertex_base_url,
                 default_model=self.model,
-                project_id=os.getenv("VERTEX_PROJECT_ID", ""),
-                region=os.getenv("VERTEX_REGION", "global"),
+                project_id=vertex_project_id,
+                region=vertex_region,
             )
             logger.info(
                 "Vertex AI client created (%s, shared=%s) %s",
