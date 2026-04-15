@@ -246,3 +246,82 @@ class TestScopedLocks:
 
         status.release_scoped_lock("telegram-bot-token", "secret")
         assert not lock_path.exists()
+
+    def test_force_release_scoped_lock_removes_stale_record(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_GATEWAY_LOCK_DIR", str(tmp_path / "locks"))
+        lock_path = tmp_path / "locks" / "telegram-bot-token-2bb80d537b1da3e3.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text(json.dumps({
+            "pid": 99999,
+            "start_time": 123,
+            "kind": "hermes-gateway",
+        }))
+
+        def fake_kill(pid, sig):
+            raise ProcessLookupError
+
+        monkeypatch.setattr(status.os, "kill", fake_kill)
+
+        ok, existing, reason = status.force_release_scoped_lock("telegram-bot-token", "secret")
+
+        assert ok is True
+        assert reason == "released"
+        assert existing["pid"] == 99999
+        assert not lock_path.exists()
+
+    def test_force_release_scoped_lock_refuses_live_owner_when_terminate_disabled(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_GATEWAY_LOCK_DIR", str(tmp_path / "locks"))
+        lock_path = tmp_path / "locks" / "telegram-bot-token-2bb80d537b1da3e3.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text(json.dumps({
+            "pid": 12345,
+            "start_time": 777,
+            "kind": "hermes-gateway",
+        }))
+
+        monkeypatch.setattr(status.os, "kill", lambda pid, sig: None)
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 777)
+
+        ok, existing, reason = status.force_release_scoped_lock(
+            "telegram-bot-token",
+            "secret",
+            terminate_owner=False,
+        )
+
+        assert ok is False
+        assert reason == "owner_alive"
+        assert existing["pid"] == 12345
+        assert lock_path.exists()
+
+    def test_force_release_scoped_lock_kills_owner_and_releases(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_GATEWAY_LOCK_DIR", str(tmp_path / "locks"))
+        lock_path = tmp_path / "locks" / "telegram-bot-token-2bb80d537b1da3e3.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text(json.dumps({
+            "pid": 12345,
+            "start_time": 888,
+            "kind": "hermes-gateway",
+        }))
+
+        state = {"alive": True, "killed": []}
+
+        def fake_kill(pid, sig):
+            if state["alive"]:
+                return None
+            raise ProcessLookupError
+
+        def fake_terminate_pid(pid, force=False):
+            state["killed"].append((pid, force))
+            state["alive"] = False
+
+        monkeypatch.setattr(status.os, "kill", fake_kill)
+        monkeypatch.setattr(status, "terminate_pid", fake_terminate_pid)
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 888)
+
+        ok, existing, reason = status.force_release_scoped_lock("telegram-bot-token", "secret")
+
+        assert ok is True
+        assert reason == "released"
+        assert existing["pid"] == 12345
+        assert state["killed"] == [(12345, True)]
+        assert not lock_path.exists()

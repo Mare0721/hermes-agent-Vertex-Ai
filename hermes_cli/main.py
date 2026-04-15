@@ -3566,6 +3566,31 @@ def _load_installable_optional_extras() -> list[str]:
     return referenced
 
 
+def _required_optional_extras_for_current_setup() -> set[str]:
+    """Return optional extras required by the current runtime configuration.
+
+    Prevents update fallback from silently dropping capabilities that are
+    already configured (e.g. Telegram gateway tokens).
+    """
+    placeholder_values = {"", "your-token-here", "changeme", "none", "null"}
+
+    def _is_configured(var_name: str) -> bool:
+        value = (os.getenv(var_name) or "").strip()
+        return bool(value) and value.lower() not in placeholder_values
+
+    required: set[str] = set()
+    messaging_vars = (
+        "TELEGRAM_BOT_TOKEN",
+        "DISCORD_BOT_TOKEN",
+        "SLACK_BOT_TOKEN",
+        "SLACK_APP_TOKEN",
+    )
+    if any(_is_configured(name) for name in messaging_vars):
+        required.add("messaging")
+
+    return required
+
+
 
 def _install_python_dependencies_with_optional_fallback(
     install_cmd_prefix: list[str],
@@ -3609,6 +3634,22 @@ def _install_python_dependencies_with_optional_fallback(
         print(f"  ✓ Reinstalled optional extras individually: {', '.join(installed_extras)}")
     if failed_extras:
         print(f"  ⚠ Skipped optional extras that still failed: {', '.join(failed_extras)}")
+
+    required_extras = _required_optional_extras_for_current_setup()
+    missing_required = sorted(required_extras - set(installed_extras))
+    if missing_required:
+        missing = ", ".join(missing_required)
+        print(f"  ✗ Required optional extras failed to install: {missing}")
+        print("    Refusing to continue because configured integrations would break.")
+        print(
+            "    Retry manually: "
+            + " ".join(install_cmd_prefix)
+            + f" install -e '.[{missing_required[0]}]'"
+        )
+        raise subprocess.CalledProcessError(
+            returncode=1,
+            cmd=install_cmd_prefix + ["install", "-e", f".[{missing_required[0]}]", "--quiet"],
+        )
 
 
 def cmd_update(args):

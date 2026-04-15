@@ -301,6 +301,7 @@ def _setup_update_mocks(monkeypatch, tmp_path):
     monkeypatch.setattr(hermes_main, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(hermes_main, "_stash_local_changes_if_needed", lambda *a, **kw: None)
     monkeypatch.setattr(hermes_main, "_restore_stashed_changes", lambda *a, **kw: True)
+    monkeypatch.setattr(hermes_main, "_required_optional_extras_for_current_setup", lambda: set())
     monkeypatch.setattr(hermes_config, "get_missing_env_vars", lambda required_only=True: [])
     monkeypatch.setattr(hermes_config, "get_missing_config_fields", lambda: [])
     monkeypatch.setattr(hermes_config, "check_config_version", lambda: (5, 5))
@@ -379,6 +380,42 @@ def test_cmd_update_succeeds_with_extras(monkeypatch, tmp_path):
     install_cmds = [c for c in recorded if "pip" in c and "install" in c]
     assert len(install_cmds) == 1
     assert ".[all]" in install_cmds[0]
+
+
+def test_cmd_update_fails_when_required_extra_cannot_install(monkeypatch, tmp_path, capsys):
+    """Configured integrations must hard-fail update if required extras are missing."""
+    _setup_update_mocks(monkeypatch, tmp_path)
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/uv" if name == "uv" else None)
+    monkeypatch.setattr(hermes_main, "_load_installable_optional_extras", lambda: ["messaging", "mcp"])
+    monkeypatch.setattr(hermes_main, "_required_optional_extras_for_current_setup", lambda: {"messaging"})
+
+    def fake_run(cmd, **kwargs):
+        if cmd == ["git", "fetch", "origin"]:
+            return SimpleNamespace(stdout="", stderr="", returncode=0)
+        if cmd == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
+            return SimpleNamespace(stdout="main\n", stderr="", returncode=0)
+        if cmd == ["git", "rev-list", "HEAD..origin/main", "--count"]:
+            return SimpleNamespace(stdout="1\n", stderr="", returncode=0)
+        if cmd == ["git", "pull", "origin", "main"]:
+            return SimpleNamespace(stdout="Updating\n", stderr="", returncode=0)
+        if cmd == ["/usr/bin/uv", "pip", "install", "-e", ".[all]", "--quiet"]:
+            raise CalledProcessError(returncode=1, cmd=cmd)
+        if cmd == ["/usr/bin/uv", "pip", "install", "-e", ".", "--quiet"]:
+            return SimpleNamespace(returncode=0)
+        if cmd == ["/usr/bin/uv", "pip", "install", "-e", ".[messaging]", "--quiet"]:
+            raise CalledProcessError(returncode=1, cmd=cmd)
+        if cmd == ["/usr/bin/uv", "pip", "install", "-e", ".[mcp]", "--quiet"]:
+            return SimpleNamespace(returncode=0)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(hermes_main.subprocess, "run", fake_run)
+
+    with pytest.raises(SystemExit) as exc:
+        hermes_main.cmd_update(SimpleNamespace())
+
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert "Required optional extras failed to install: messaging" in out
 
 
 # ---------------------------------------------------------------------------
