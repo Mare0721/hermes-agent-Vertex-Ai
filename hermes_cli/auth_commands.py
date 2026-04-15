@@ -94,7 +94,45 @@ def _provider_base_url(provider: str) -> str:
             return str(cp_config.get("base_url") or "").strip()
         return ""
     pconfig = PROVIDER_REGISTRY.get(provider)
+    if pconfig and pconfig.base_url_env_var:
+        try:
+            from hermes_cli.config import get_env_value
+
+            env_override = (get_env_value(pconfig.base_url_env_var) or "").strip()
+        except Exception:
+            env_override = ""
+        if env_override:
+            return env_override
     return pconfig.inference_base_url if pconfig else ""
+
+
+def _is_vertex_models_base_url(url: str) -> bool:
+    normalized = str(url or "").strip().rstrip("/")
+    return (
+        "/projects/" in normalized
+        and "/locations/" in normalized
+        and "/publishers/google/models" in normalized
+    )
+
+
+def _resolve_vertex_entry_base_url(base_url: str, project_id: str, region: str) -> str:
+    normalized_base = str(base_url or "").strip().rstrip("/")
+    if _is_vertex_models_base_url(normalized_base):
+        return normalized_base
+
+    resolved_project = (project_id or "").strip()
+    resolved_region = (region or "").strip() or "global"
+    if resolved_project:
+        try:
+            from agent.models.vertex_ai import build_vertex_models_base_url
+
+            scoped_base = build_vertex_models_base_url(resolved_project, resolved_region)
+            if scoped_base:
+                return scoped_base.rstrip("/")
+        except Exception:
+            pass
+
+    return normalized_base
 
 
 def _oauth_default_label(provider: str, count: int) -> str:
@@ -161,6 +199,51 @@ def auth_add_command(args) -> None:
         label = (getattr(args, "label", None) or "").strip()
         if not label:
             label = input(f"Label (optional, default: {default_label}): ").strip() or default_label
+
+        entry_base_url = _provider_base_url(provider)
+
+        if provider == "vertex":
+            from hermes_cli.config import get_env_value
+
+            current_base = get_env_value("VERTEX_BASE_URL") or ""
+            current_project = get_env_value("VERTEX_PROJECT_ID") or ""
+            current_region = get_env_value("VERTEX_REGION") or ""
+
+            default_base = current_base or _provider_base_url(provider)
+            default_region = current_region or "global"
+
+            base_prompt = input(
+                f"Vertex base URL [{default_base}] (optional): "
+            ).strip()
+            scoped_base = default_base
+            if base_prompt:
+                if not base_prompt.startswith(("http://", "https://")):
+                    print("  Invalid Vertex base URL — keeping current value.")
+                else:
+                    scoped_base = base_prompt
+
+            project_prompt = input(
+                f"Vertex project ID [{current_project or 'optional'}]: "
+            ).strip()
+            scoped_project = project_prompt or current_project
+
+            region_prompt = input(
+                f"Vertex region/location [{default_region}]: "
+            ).strip()
+            scoped_region = region_prompt or default_region
+
+            entry_base_url = _resolve_vertex_entry_base_url(
+                scoped_base,
+                scoped_project,
+                scoped_region,
+            )
+
+            if not _is_vertex_models_base_url(entry_base_url):
+                raise SystemExit(
+                    "Vertex key requires a project/region binding. "
+                    "Provide Vertex project ID (or a full '/projects/.../locations/.../publishers/google/models' base URL)."
+                )
+
         entry = PooledCredential(
             provider=provider,
             id=uuid.uuid4().hex[:6],
@@ -169,7 +252,7 @@ def auth_add_command(args) -> None:
             priority=0,
             source=SOURCE_MANUAL,
             access_token=token,
-            base_url=_provider_base_url(provider),
+            base_url=entry_base_url,
         )
         pool.add_entry(entry)
         print(f'Added {provider} credential #{len(pool.entries())}: "{label}"')
