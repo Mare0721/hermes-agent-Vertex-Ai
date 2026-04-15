@@ -1,7 +1,7 @@
 ## 相比原版新增支持能力
 
 ### 1）Vertex Provider 全链路支持
-- 在 provider 和 model 选择流程中注册 Vertex。
+- 在 provider 和 model 选择流程中注册 Vertex Ai。
 - 增加 Vertex 的别名与模型路由兼容处理。
 - 扩展认证与运行时解析流程，使 Vertex 能在实际运行中被完整识别和使用。
 - 支持按 key 绑定 base_url，可将不同 key 路由到不同的 Vertex 项目和区域。
@@ -56,11 +56,12 @@
   - tests/hermes_cli/*
   - tests/run_agent/*
 
-## 总结
+
 相比原版 main，这个分支重点提供了：
-1. 可实用的 Vertex 全链路支持。
+1. 可实用的 Vertex Ai 全链路支持。
 2. 更强的凭证池轮换与 exhausted 容错。
-3. 更完整的网关媒体能力与回归测试保障。
+3. 更完整的网关媒体能力。
+4. 仅为Gemini适配
 
 目标分支：adapt/vertex-feature-20260415-1-sync-20260415
 对比基线：main
