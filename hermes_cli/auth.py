@@ -2496,6 +2496,15 @@ def resolve_api_key_provider_credentials(provider_id: str) -> Dict[str, Any]:
     }
 
 
+def resolve_gemini_oauth_runtime_credentials() -> Dict[str, Any]:
+    """Backward-compatible runtime resolver for Gemini credentials.
+
+    Some callers still import this legacy symbol name. Gemini is currently
+    handled as an API-key provider in this branch, so delegate accordingly.
+    """
+    return resolve_api_key_provider_credentials("gemini")
+
+
 def resolve_external_process_provider_credentials(provider_id: str) -> Dict[str, Any]:
     """Resolve runtime details for local subprocess-backed providers."""
     pconfig = PROVIDER_REGISTRY.get(provider_id)

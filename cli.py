@@ -3129,7 +3129,8 @@ class HermesCLI:
         """
         from hermes_cli.models import resolve_fast_mode_overrides
 
-        runtime = {
+        primary = {
+            "model": self.model,
             "api_key": self.api_key,
             "base_url": self.base_url,
             "provider": self.provider,
@@ -3138,11 +3139,46 @@ class HermesCLI:
             "args": list(self.acp_args or []),
             "credential_pool": getattr(self, "_credential_pool", None),
         }
+
+        resolved = None
+        try:
+            from agent import smart_model_routing
+
+            resolved = smart_model_routing.resolve_turn_route(
+                user_message,
+                getattr(self, "_smart_model_routing", None),
+                primary,
+            )
+        except Exception:
+            resolved = None
+
+        resolved_runtime = None
+        if isinstance(resolved, dict):
+            candidate = resolved.get("runtime")
+            if isinstance(candidate, dict):
+                resolved_runtime = candidate
+
+        runtime = {
+            "api_key": (resolved_runtime or {}).get("api_key", primary["api_key"]),
+            "base_url": (resolved_runtime or {}).get("base_url", primary["base_url"]),
+            "provider": (resolved_runtime or {}).get("provider", primary["provider"]),
+            "api_mode": (resolved_runtime or {}).get("api_mode", primary["api_mode"]),
+            "command": (resolved_runtime or {}).get("command", primary["command"]),
+            "args": list((resolved_runtime or {}).get("args", primary["args"]) or []),
+            "credential_pool": (resolved_runtime or {}).get(
+                "credential_pool", primary["credential_pool"]
+            ),
+        }
+
+        routed_model = self.model
+        if isinstance(resolved, dict) and resolved.get("model"):
+            routed_model = resolved.get("model")
+
         route = {
-            "model": self.model,
+            "model": routed_model,
             "runtime": runtime,
             "signature": (
-                self.model,
+                routed_model,
                 runtime["provider"],
                 runtime["base_url"],
                 runtime["api_mode"],
