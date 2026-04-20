@@ -75,16 +75,6 @@ def _codex_override():
     }
 
 
-def _vertex_override():
-    return {
-        "model": "gemini-3.1-pro-preview",
-        "provider": "vertex",
-        "api_key": "vertex-key-1",
-        "base_url": "https://aiplatform.googleapis.com/v1/projects/test/locations/global/publishers/google/models",
-        "api_mode": "chat_completions",
-    }
-
-
 def _explode_runtime_resolution():
     raise AssertionError(
         "global runtime resolution should not run when a complete session override exists"
@@ -168,38 +158,3 @@ async def test_background_task_prefers_session_override_over_global_runtime(monk
     assert _CapturingAgent.last_init["api_mode"] == "codex_responses"
     assert _CapturingAgent.last_init["base_url"] == "https://chatgpt.com/backend-api/codex"
     assert _CapturingAgent.last_init["api_key"] == "***"
-
-
-def test_session_override_fast_path_hydrates_credential_pool(monkeypatch):
-    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
-    monkeypatch.setattr(gateway_run, "_resolve_gateway_model", lambda _cfg: "gemini-3.1-pro-preview")
-    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", _explode_runtime_resolution)
-
-    sentinel_pool = object()
-    monkeypatch.setattr(
-        gateway_run,
-        "_load_provider_credential_pool",
-        lambda provider: sentinel_pool if provider == "vertex" else None,
-    )
-
-    runner = _make_runner()
-    source = SessionSource(
-        platform=Platform.LOCAL,
-        chat_id="cli",
-        chat_name="CLI",
-        chat_type="dm",
-        user_id="user-1",
-    )
-    session_key = "agent:main:local:dm"
-    runner._session_model_overrides[session_key] = _vertex_override()
-
-    model, runtime_kwargs = runner._resolve_session_agent_runtime(
-        source=source,
-        session_key=session_key,
-        user_config={},
-    )
-
-    assert model == "gemini-3.1-pro-preview"
-    assert runtime_kwargs["provider"] == "vertex"
-    assert runtime_kwargs["api_key"] == "vertex-key-1"
-    assert runtime_kwargs["credential_pool"] is sentinel_pool

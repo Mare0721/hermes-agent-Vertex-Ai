@@ -74,8 +74,6 @@ from gateway.platforms.base import (
     cache_document_from_bytes,
     resolve_proxy_url,
     SUPPORTED_DOCUMENT_TYPES,
-    resolve_supported_document_extension,
-    is_text_document_mime,
     utf16_len,
     _prefix_within_utf16_limit,
 )
@@ -2635,11 +2633,16 @@ class TelegramAdapter(BasePlatformAdapter):
             doc = msg.document
             try:
                 # Determine file extension
+                ext = ""
                 original_filename = doc.file_name or ""
-                ext = resolve_supported_document_extension(
-                    original_filename,
-                    doc.mime_type or "",
-                )
+                if original_filename:
+                    _, ext = os.path.splitext(original_filename)
+                    ext = ext.lower()
+
+                # If no extension from filename, reverse-lookup from MIME type
+                if not ext and doc.mime_type:
+                    mime_to_ext = {v: k for k, v in SUPPORTED_DOCUMENT_TYPES.items()}
+                    ext = mime_to_ext.get(doc.mime_type, "")
 
                 # Check if supported
                 if ext not in SUPPORTED_DOCUMENT_TYPES:
@@ -2673,9 +2676,9 @@ class TelegramAdapter(BasePlatformAdapter):
                 event.media_types = [mime_type]
                 logger.info("[Telegram] Cached user document at %s", cached_path)
 
-                # For text-like files, inject content into event.text (capped at 100 KB)
+                # For text files, inject content into event.text (capped at 100 KB)
                 MAX_TEXT_INJECT_BYTES = 100 * 1024
-                if is_text_document_mime(mime_type) and len(raw_bytes) <= MAX_TEXT_INJECT_BYTES:
+                if ext in (".md", ".txt") and len(raw_bytes) <= MAX_TEXT_INJECT_BYTES:
                     try:
                         text_content = raw_bytes.decode("utf-8")
                         display_name = original_filename or f"document{ext}"

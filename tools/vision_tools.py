@@ -29,17 +29,12 @@ Usage:
 """
 
 import base64
-import random
 import json
 import logging
 import os
 import uuid
-import asyncio
-import re
-import threading
-from weakref import WeakKeyDictionary
 from pathlib import Path
-from typing import Any, Awaitable, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Dict, Optional
 from urllib.parse import urlparse
 import httpx
 from agent.auxiliary_client import async_call_llm, extract_content_or_reasoning
@@ -49,55 +44,6 @@ from tools.website_policy import check_website_access
 logger = logging.getLogger(__name__)
 
 _debug = DebugSession("vision_tools", env_var="VISION_TOOLS_DEBUG")
-
-# Guardrail wrapper for vision prompts to reduce hallucination risk.
-# Keep this concise and evidence-first so answers stay grounded in visible pixels.
-_VISION_EVIDENCE_GUARDRAILS = (
-    "You are a strict vision analyst. Use only what is directly visible in the image.\n"
-    "Do not invent details, names, events, identities, locations, brands, or text that are not clearly visible.\n"
-    "If any part is unclear, occluded, blurred, or too small, explicitly say it is uncertain.\n"
-    "Do not mention system/tool limitations (for example: truncation, hidden context, missing original file access, or re-upload requests).\n"
-    "If the question cannot be answered from the visible content, say that it cannot be determined from this image.\n"
-    "Be comprehensive and specific when describing visible details.\n"
-)
-
-
-def build_grounded_vision_prompt(user_request: str) -> str:
-    """Build an evidence-first prompt for vision analysis.
-
-    This helper is reused by all automatic image pre-analysis flows so they
-    inherit the same anti-hallucination constraints.
-    """
-    request = (user_request or "").strip()
-    if not request:
-        request = "Describe the visible content of this image."
-
-    lower_request = request.lower()
-    # OCR mode should trigger only for explicit text-extraction requests.
-    # Avoid broad terms like "识别" that are often used for general image understanding.
-    ocr_mode = any(keyword in request for keyword in (
-        "图片中的文字", "图中的文字", "图中文字", "文字识别", "提取文字", "提取文本",
-        "抄下来", "抄写", "原文", "逐字", "转写"
-    )) or any(keyword in lower_request for keyword in (
-        "transcribe", "ocr", "extract the text", "read the text", "copy the text"
-    ))
-
-    task_guidance = (
-        "Return only the text you can directly read from the image, in the same order as it appears. "
-        "Do not summarize, explain, or add commentary. "
-        "Do not mention whether the text is complete or incomplete. "
-        "When uncertain, mark unclear words with [?] instead of talking about limitations."
-        if ocr_mode
-           else "Provide a thorough, structured visual description first, then answer the request. "
-               "Cover layout, key objects/people, readable text, UI elements, colors/style, and relationships between elements. "
-               "When uncertain, clearly label uncertainty instead of guessing."
-    )
-
-    return (
-        f"{_VISION_EVIDENCE_GUARDRAILS}\n"
-        f"{task_guidance}\n\n"
-        f"User request: {request}"
-    )
 
 # Configurable HTTP download timeout for _download_image().
 # Separate from auxiliary.vision.timeout which governs the LLM API call.
@@ -124,266 +70,6 @@ _VISION_DOWNLOAD_TIMEOUT = _resolve_download_timeout()
 # Hard cap on downloaded image file size (50 MB). Prevents OOM from
 # attacker-hosted multi-gigabyte files or decompression bombs.
 _VISION_MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
-
-# Lightweight runtime health monitor for consecutive vision failures.
-_VISION_CONSECUTIVE_ERRORS = 0
-
-
-def _resolve_error_warn_threshold() -> int:
-    env_val = os.getenv("HERMES_VISION_ERROR_WARN_THRESHOLD", "").strip()
-    if env_val:
-        try:
-            parsed = int(float(env_val))
-            if parsed > 0:
-                return parsed
-        except ValueError:
-            pass
-
-    try:
-        from hermes_cli.config import load_config
-
-        cfg = load_config()
-        val = cfg.get("auxiliary", {}).get("vision", {}).get("error_warn_threshold")
-        if val is not None:
-            parsed = int(float(val))
-            if parsed > 0:
-                return parsed
-    except Exception:
-        pass
-
-    return 3
-
-
-_VISION_ERROR_WARN_THRESHOLD = _resolve_error_warn_threshold()
-_VISION_RUNTIME_CONFIG_LOGGED = False
-
-
-def _read_vision_cfg() -> Dict[str, Any]:
-    try:
-        from hermes_cli.config import load_config
-
-        cfg = load_config()
-        vision_cfg = cfg.get("auxiliary", {}).get("vision", {})
-        if isinstance(vision_cfg, dict):
-            return vision_cfg
-    except Exception:
-        pass
-    return {}
-
-
-def _resolve_max_concurrency() -> int:
-    env_val = os.getenv("HERMES_VISION_MAX_CONCURRENCY", "").strip()
-    if env_val:
-        try:
-            parsed = int(float(env_val))
-            if parsed > 0:
-                return parsed
-        except ValueError:
-            pass
-
-    cfg_val = _read_vision_cfg().get("max_concurrency")
-    if cfg_val is not None:
-        try:
-            parsed = int(float(cfg_val))
-            if parsed > 0:
-                return parsed
-        except (TypeError, ValueError):
-            pass
-    return 3
-
-
-def _resolve_backoff_base_seconds() -> float:
-    env_val = os.getenv("HERMES_VISION_RATE_LIMIT_BACKOFF_BASE", "").strip()
-    if env_val:
-        try:
-            parsed = float(env_val)
-            if parsed >= 0:
-                return parsed
-        except ValueError:
-            pass
-
-    cfg_val = _read_vision_cfg().get("rate_limit_backoff_base")
-    if cfg_val is not None:
-        try:
-            parsed = float(cfg_val)
-            if parsed >= 0:
-                return parsed
-        except (TypeError, ValueError):
-            pass
-    return 0.2
-
-
-def _resolve_backoff_max_seconds() -> float:
-    env_val = os.getenv("HERMES_VISION_RATE_LIMIT_BACKOFF_MAX", "").strip()
-    if env_val:
-        try:
-            parsed = float(env_val)
-            if parsed >= 0:
-                return parsed
-        except ValueError:
-            pass
-
-    cfg_val = _read_vision_cfg().get("rate_limit_backoff_max")
-    if cfg_val is not None:
-        try:
-            parsed = float(cfg_val)
-            if parsed >= 0:
-                return parsed
-        except (TypeError, ValueError):
-            pass
-    return 1.0
-
-
-def _resolve_backoff_jitter_seconds() -> float:
-    env_val = os.getenv("HERMES_VISION_RATE_LIMIT_BACKOFF_JITTER", "").strip()
-    if env_val:
-        try:
-            parsed = float(env_val)
-            if parsed >= 0:
-                return parsed
-        except ValueError:
-            pass
-
-    cfg_val = _read_vision_cfg().get("rate_limit_backoff_jitter")
-    if cfg_val is not None:
-        try:
-            parsed = float(cfg_val)
-            if parsed >= 0:
-                return parsed
-        except (TypeError, ValueError):
-            pass
-    return 0.15
-
-
-_VISION_MAX_CONCURRENCY = _resolve_max_concurrency()
-_VISION_RATE_LIMIT_BACKOFF_BASE_SECONDS = _resolve_backoff_base_seconds()
-_VISION_RATE_LIMIT_BACKOFF_MAX_SECONDS = _resolve_backoff_max_seconds()
-_VISION_RATE_LIMIT_BACKOFF_JITTER_SECONDS = _resolve_backoff_jitter_seconds()
-_VISION_LOOP_SEMAPHORES: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = WeakKeyDictionary()
-_VISION_LOOP_SEMAPHORES_LOCK = threading.Lock()
-_VISION_ANALYSIS_MAX_TOKENS = 3000
-
-
-def _get_vision_semaphore() -> asyncio.Semaphore:
-    """Return a per-event-loop semaphore for vision LLM calls."""
-    loop = asyncio.get_running_loop()
-    with _VISION_LOOP_SEMAPHORES_LOCK:
-        semaphore = _VISION_LOOP_SEMAPHORES.get(loop)
-        if semaphore is None:
-            semaphore = asyncio.Semaphore(_VISION_MAX_CONCURRENCY)
-            _VISION_LOOP_SEMAPHORES[loop] = semaphore
-        return semaphore
-
-
-def _log_vision_runtime_config_once() -> None:
-    global _VISION_RUNTIME_CONFIG_LOGGED
-    if _VISION_RUNTIME_CONFIG_LOGGED:
-        return
-
-    _VISION_RUNTIME_CONFIG_LOGGED = True
-    logger.info(
-        "Vision runtime config: download_timeout=%.2fs, error_warn_threshold=%d, max_concurrency=%d, backoff_base=%.2fs, backoff_max=%.2fs, backoff_jitter=%.2fs, analysis_max_tokens=%d",
-        _VISION_DOWNLOAD_TIMEOUT,
-        _VISION_ERROR_WARN_THRESHOLD,
-        _VISION_MAX_CONCURRENCY,
-        _VISION_RATE_LIMIT_BACKOFF_BASE_SECONDS,
-        _VISION_RATE_LIMIT_BACKOFF_MAX_SECONDS,
-        _VISION_RATE_LIMIT_BACKOFF_JITTER_SECONDS,
-        _VISION_ANALYSIS_MAX_TOKENS,
-    )
-
-
-def _record_vision_success() -> None:
-    global _VISION_CONSECUTIVE_ERRORS
-    if _VISION_CONSECUTIVE_ERRORS:
-        logger.info(
-            "Vision health recovered after %d consecutive error(s)",
-            _VISION_CONSECUTIVE_ERRORS,
-        )
-    _VISION_CONSECUTIVE_ERRORS = 0
-
-
-def _record_vision_error(error: Exception) -> None:
-    global _VISION_CONSECUTIVE_ERRORS
-    _VISION_CONSECUTIVE_ERRORS += 1
-    if _VISION_CONSECUTIVE_ERRORS >= _VISION_ERROR_WARN_THRESHOLD:
-        logger.warning(
-            "Vision health warning: %d consecutive error(s). last_error=%s",
-            _VISION_CONSECUTIVE_ERRORS,
-            error,
-        )
-
-
-_VISION_META_LIMITATION_HINTS_EN: Tuple[str, ...] = (
-    "provided image description",
-    "image description is truncated",
-    "system-provided",
-    "cannot access the full image",
-    "unable to retrieve the full image",
-    "cannot access the original image",
-    "don't have access to the full image",
-)
-
-_VISION_META_LIMITATION_HINTS_ZH: Tuple[str, ...] = (
-    "系统提供给我的图像描述",
-    "系统提供给我的文本",
-    "图像描述信息在这里被截断",
-    "信息截断",
-    "后面的内容无法看到",
-    "后续内容无法看到",
-    "剩余内容无法看到",
-    "无法看到后面的内容",
-    "无法获取图像的完整",
-    "看不到图像的完整",
-    "无法看到图像的完整",
-)
-
-
-def _sanitize_vision_analysis_text(analysis: str) -> str:
-    """Remove model-meta limitation lines from successful vision descriptions.
-
-    Some upstream models occasionally emit self-referential caveats such as
-    "system-provided image description was truncated". Those lines confuse the
-    final assistant and cause repeated low-confidence replies. Keep observable
-    facts and strip only these meta caveats.
-    """
-    text = str(analysis or "").strip()
-    if not text:
-        return text
-
-    lines = text.splitlines()
-    kept: List[str] = []
-    for line in lines:
-        stripped = line.strip()
-        if not stripped:
-            if kept and kept[-1] != "":
-                kept.append("")
-            continue
-
-        lowered = stripped.lower()
-        has_meta_en = any(hint in lowered for hint in _VISION_META_LIMITATION_HINTS_EN)
-        has_meta_zh = any(hint in stripped for hint in _VISION_META_LIMITATION_HINTS_ZH)
-        has_meta_note = ("注：" in stripped) or ("注:" in stripped) or ("（注" in stripped) or ("(注" in stripped)
-        has_truncation_claim = any(phrase in stripped for phrase in (
-            "信息截断",
-            "后面的内容无法看到",
-            "后续内容无法看到",
-            "剩余内容无法看到",
-            "无法看到后面的内容",
-        ))
-
-        # Also drop parenthetical NOTE blocks that only describe system limits.
-        is_meta_note = bool(
-            re.search(r"^[（(]\s*注[:：].*(截断|完整|看不到|无法获取).*[）)]$", stripped)
-        )
-
-        if (has_meta_note and ("截断" in stripped or "完整" in stripped or "看不到" in stripped or "无法获取" in stripped or "系统提供给我" in stripped)) or has_meta_en or has_meta_zh or is_meta_note or has_truncation_claim:
-            continue
-
-        kept.append(line)
-
-    cleaned = "\n".join(kept).strip()
-    return cleaned or text
 
 
 def _validate_image_url(url: str) -> bool:
@@ -415,27 +101,6 @@ def _validate_image_url(url: str) -> bool:
         return False
 
     return True
-
-
-def _expand_user_path(path_value: str) -> str:
-    """Expand user-home prefixes consistently across platforms.
-
-    Python's native expanduser behavior differs on Windows and may ignore HOME.
-    We explicitly honor HOME for "~", "~/...", and "~\\..." so tests and
-    runtime behavior stay predictable in mixed environments (WSL/Windows).
-    """
-    text = str(path_value or "").strip()
-    if not text:
-        return text
-
-    if text == "~" or text.startswith("~/") or text.startswith("~\\"):
-        home_override = os.getenv("HOME", "").strip()
-        if home_override:
-            if text == "~":
-                return str(Path(home_override))
-            return str(Path(home_override) / text[2:])
-
-    return os.path.expanduser(text)
 
 
 def _detect_image_mime_type(image_path: Path) -> Optional[str]:
@@ -631,93 +296,6 @@ def _is_image_size_error(error: Exception) -> bool:
     ))
 
 
-def _is_rate_limit_error(error: Exception) -> bool:
-    """Detect provider throttling errors (429/quota/rate-limit variants)."""
-    status = getattr(error, "status_code", None)
-    if status == 429:
-        return True
-    err_str = str(error).lower()
-    return any(hint in err_str for hint in (
-        "429", "too many requests", "rate limit", "ratelimit",
-        "resource_exhausted", "quota",
-    ))
-
-
-def _get_vision_fallback_providers() -> List[str]:
-    """Return ordered alternate vision providers for throttling fallback."""
-    preferred = ["openrouter", "nous", "anthropic", "openai-codex", "custom"]
-    try:
-        from agent.auxiliary_client import get_available_vision_backends
-
-        available = [
-            str(p).strip().lower()
-            for p in (get_available_vision_backends() or [])
-            if str(p).strip()
-        ]
-    except Exception:
-        available = []
-
-    ordered: List[str] = []
-    for provider in preferred:
-        if provider in available and provider not in ordered:
-            ordered.append(provider)
-    for provider in available:
-        if provider not in ordered:
-            ordered.append(provider)
-
-    # Skip primary-provider aliases that likely map back to the same throttled backend.
-    return [p for p in ordered if p not in {"vertex", "gemini", "google", "auto"}]
-
-
-async def _retry_vision_on_rate_limit(
-    call_kwargs: Dict[str, Any],
-    initial_error: Exception,
-) -> Tuple[Any, Dict[str, Any]]:
-    """Retry a vision request on alternate providers after 429 throttling."""
-    for attempt_index, provider in enumerate(_get_vision_fallback_providers()):
-        fallback_kwargs = dict(call_kwargs)
-        fallback_kwargs["provider"] = provider
-        # Provider-specific defaults are safer than carrying a model name
-        # from the throttled backend.
-        fallback_kwargs.pop("model", None)
-
-        base = max(_VISION_RATE_LIMIT_BACKOFF_BASE_SECONDS, 0.0)
-        cap = max(_VISION_RATE_LIMIT_BACKOFF_MAX_SECONDS, 0.0)
-        delay = 0.0
-        if base > 0:
-            delay = base * (2 ** attempt_index)
-            if cap > 0:
-                delay = min(delay, cap)
-        jitter = 0.0
-        if _VISION_RATE_LIMIT_BACKOFF_JITTER_SECONDS > 0:
-            jitter = random.uniform(0.0, _VISION_RATE_LIMIT_BACKOFF_JITTER_SECONDS)
-        total_delay = delay + jitter
-        if total_delay > 0:
-            logger.warning(
-                "Vision fallback backoff before provider=%s: %.2fs",
-                provider,
-                total_delay,
-            )
-            await asyncio.sleep(total_delay)
-
-        try:
-            logger.warning(
-                "Vision request rate-limited; retrying with provider=%s",
-                provider,
-            )
-            async with _get_vision_semaphore():
-                response = await async_call_llm(**fallback_kwargs)
-            return response, fallback_kwargs
-        except Exception as fallback_error:
-            logger.warning(
-                "Vision fallback provider %s failed: %s",
-                provider,
-                fallback_error,
-            )
-
-    raise initial_error
-
-
 def _resize_image_for_vision(image_path: Path, mime_type: Optional[str] = None,
                               max_base64_bytes: int = _RESIZE_TARGET_BYTES) -> str:
     """Convert an image to a base64 data URL, auto-resizing if too large.
@@ -885,8 +463,6 @@ async def vision_analyze_tool(
         if is_interrupted():
             return tool_error("Interrupted", success=False)
 
-        _log_vision_runtime_config_once()
-
         logger.info("Analyzing image: %s", image_url[:60])
         logger.info("User prompt: %s", user_prompt[:100])
         
@@ -895,7 +471,7 @@ async def vision_analyze_tool(
         resolved_url = image_url
         if resolved_url.startswith("file://"):
             resolved_url = resolved_url[len("file://"):]
-        local_path = Path(_expand_user_path(resolved_url))
+        local_path = Path(os.path.expanduser(resolved_url))
         if local_path.is_file():
             # Local file path (e.g. from platform image cache) -- skip download
             logger.info("Using local image file: %s", image_url)
@@ -977,27 +553,31 @@ async def vision_analyze_tool(
         # Read timeout from config.yaml (auxiliary.vision.timeout), default 120s.
         # Local vision models (llama.cpp, ollama) can take well over 30s.
         vision_timeout = 120.0
+        vision_temperature = 0.1
         try:
             from hermes_cli.config import load_config
             _cfg = load_config()
-            _vt = _cfg.get("auxiliary", {}).get("vision", {}).get("timeout")
+            _vision_cfg = _cfg.get("auxiliary", {}).get("vision", {})
+            _vt = _vision_cfg.get("timeout")
             if _vt is not None:
                 vision_timeout = float(_vt)
+            _vtemp = _vision_cfg.get("temperature")
+            if _vtemp is not None:
+                vision_temperature = float(_vtemp)
         except Exception:
             pass
         call_kwargs = {
             "task": "vision",
             "messages": messages,
-            "temperature": 0.0,
-            "max_tokens": _VISION_ANALYSIS_MAX_TOKENS,
+            "temperature": vision_temperature,
+            "max_tokens": 2000,
             "timeout": vision_timeout,
         }
         if model:
             call_kwargs["model"] = model
         # Try full-size image first; on size-related rejection, downscale and retry.
         try:
-            async with _get_vision_semaphore():
-                response = await async_call_llm(**call_kwargs)
+            response = await async_call_llm(**call_kwargs)
         except Exception as _api_err:
             if (_is_image_size_error(_api_err)
                     and len(image_data_url) > _RESIZE_TARGET_BYTES):
@@ -1010,13 +590,7 @@ async def vision_analyze_tool(
                 image_data_url = _resize_image_for_vision(
                     temp_image_path, mime_type=detected_mime_type)
                 messages[0]["content"][1]["image_url"]["url"] = image_data_url
-                async with _get_vision_semaphore():
-                    response = await async_call_llm(**call_kwargs)
-            elif _is_rate_limit_error(_api_err):
-                response, call_kwargs = await _retry_vision_on_rate_limit(
-                    call_kwargs,
-                    _api_err,
-                )
+                response = await async_call_llm(**call_kwargs)
             else:
                 raise
         
@@ -1026,11 +600,8 @@ async def vision_analyze_tool(
         # Retry once on empty content (reasoning-only response)
         if not analysis:
             logger.warning("Vision LLM returned empty content, retrying once")
-            async with _get_vision_semaphore():
-                response = await async_call_llm(**call_kwargs)
+            response = await async_call_llm(**call_kwargs)
             analysis = extract_content_or_reasoning(response)
-
-        analysis = _sanitize_vision_analysis_text(analysis)
 
         analysis_length = len(analysis)
         
@@ -1041,7 +612,6 @@ async def vision_analyze_tool(
             "success": True,
             "analysis": analysis or "There was a problem with the request and the image could not be analyzed."
         }
-        _record_vision_success()
         
         debug_call_data["success"] = True
         debug_call_data["analysis_length"] = analysis_length
@@ -1055,21 +625,11 @@ async def vision_analyze_tool(
     except Exception as e:
         error_msg = f"Error analyzing image: {str(e)}"
         logger.error("%s", error_msg, exc_info=True)
-        _record_vision_error(e)
         
         # Detect vision capability errors — give the model a clear message
         # so it can inform the user instead of a cryptic API error.
         err_str = str(e).lower()
         if any(hint in err_str for hint in (
-            "429", "too many requests", "rate limit", "quota",
-        )):
-            analysis = (
-                "Vision request was rate-limited, so the image could not be read. "
-                "Do not infer or guess image content from text alone. "
-                "Please retry after a short wait. "
-                f"Error: {e}"
-            )
-        elif any(hint in err_str for hint in (
             "402", "insufficient", "payment required", "credits", "billing",
         )):
             analysis = (
@@ -1133,23 +693,6 @@ def check_vision_requirements() -> bool:
     except Exception:
         return False
 
-
-def get_debug_session_info() -> Dict[str, Any]:
-    """
-    Get information about the current debug session.
-    
-    Returns:
-        Dict[str, Any]: Dictionary containing debug session information
-    """
-    info = _debug.get_session_info()
-    info["vision_consecutive_errors"] = _VISION_CONSECUTIVE_ERRORS
-    info["vision_error_warn_threshold"] = _VISION_ERROR_WARN_THRESHOLD
-    info["vision_download_timeout"] = _VISION_DOWNLOAD_TIMEOUT
-    info["vision_max_concurrency"] = _VISION_MAX_CONCURRENCY
-    info["vision_rate_limit_backoff_base"] = _VISION_RATE_LIMIT_BACKOFF_BASE_SECONDS
-    info["vision_rate_limit_backoff_max"] = _VISION_RATE_LIMIT_BACKOFF_MAX_SECONDS
-    info["vision_rate_limit_backoff_jitter"] = _VISION_RATE_LIMIT_BACKOFF_JITTER_SECONDS
-    return info
 
 
 if __name__ == "__main__":
@@ -1232,7 +775,10 @@ VISION_ANALYZE_SCHEMA = {
 def _handle_vision_analyze(args: Dict[str, Any], **kw: Any) -> Awaitable[str]:
     image_url = args.get("image_url", "")
     question = args.get("question", "")
-    full_prompt = build_grounded_vision_prompt(question)
+    full_prompt = (
+        "Fully describe and explain everything about this image, then answer the "
+        f"following question:\n\n{question}"
+    )
     model = os.getenv("AUXILIARY_VISION_MODEL", "").strip() or None
     return vision_analyze_tool(image_url, full_prompt, model)
 

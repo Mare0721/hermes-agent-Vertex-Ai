@@ -72,6 +72,10 @@ unset HERMES_YOLO_MODE HERMES_INTERACTIVE HERMES_QUIET HERMES_TOOL_PROGRESS \
       HERMES_REDACT_SECRETS HERMES_BACKGROUND_NOTIFICATIONS HERMES_EXEC_ASK \
       HERMES_HOME_MODE 2>/dev/null || true
 
+# Unset platform auth filters that can leak from local shells and make
+# callback-authorization tests non-hermetic.
+unset TELEGRAM_ALLOWED_USERS 2>/dev/null || true
+
 # Pin deterministic runtime.
 export TZ=UTC
 export LANG=C.UTF-8

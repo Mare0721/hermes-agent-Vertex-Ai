@@ -285,8 +285,6 @@ from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
     MessageType,
-    TEXT_DOCUMENT_EXTENSIONS,
-    is_text_document_mime,
     merge_pending_message_event,
 )
 from gateway.restart import (
@@ -370,24 +368,6 @@ def _resolve_runtime_agent_kwargs() -> dict:
         "args": list(runtime.get("args") or []),
         "credential_pool": runtime.get("credential_pool"),
     }
-
-
-def _load_provider_credential_pool(provider: Optional[str]) -> Any:
-    """Load a provider-scoped credential pool when available."""
-    provider_name = str(provider or "").strip().lower()
-    if not provider_name:
-        return None
-
-    try:
-        from agent.credential_pool import load_pool
-
-        pool = load_pool(provider_name)
-    except Exception:
-        return None
-
-    if pool and pool.has_credentials():
-        return pool
-    return None
 
 
 def _build_media_placeholder(event) -> str:
@@ -631,7 +611,7 @@ class GatewayRunner:
     _restart_detached: bool = False
     _restart_via_service: bool = False
     _stop_task: Optional[asyncio.Task] = None
-    _session_model_overrides: Dict[str, Dict[str, Any]] = {}
+    _session_model_overrides: Dict[str, Dict[str, str]] = {}
     
     def __init__(self, config: Optional[GatewayConfig] = None):
         self.config = config or load_gateway_config()
@@ -693,8 +673,8 @@ class GatewayRunner:
         self._agent_cache_lock = _threading.Lock()
 
         # Per-session model overrides from /model command.
-        # Key: session_key, Value: dict with model/provider/api_key/base_url/api_mode/credential_pool
-        self._session_model_overrides: Dict[str, Dict[str, Any]] = {}
+        # Key: session_key, Value: dict with model/provider/api_key/base_url/api_mode
+        self._session_model_overrides: Dict[str, Dict[str, str]] = {}
         # Track pending exec approvals per session
         # Key: session_key, Value: {"command": str, "pattern_key": str, ...}
         self._pending_approvals: Dict[str, Dict[str, Any]] = {}
@@ -1074,12 +1054,7 @@ class GatewayRunner:
                 "api_key": override.get("api_key"),
                 "base_url": override.get("base_url"),
                 "api_mode": override.get("api_mode"),
-                "credential_pool": override.get("credential_pool"),
             }
-            if not override_runtime.get("credential_pool"):
-                override_runtime["credential_pool"] = _load_provider_credential_pool(
-                    override_runtime.get("provider")
-                )
             if override_runtime.get("api_key"):
                 logger.debug(
                     "Session model override (fast): session=%s config_model=%s -> override_model=%s provider=%s",
@@ -1134,8 +1109,7 @@ class GatewayRunner:
         """
         from hermes_cli.models import resolve_fast_mode_overrides
 
-        primary = {
-            "model": model,
+        runtime = {
             "api_key": runtime_kwargs.get("api_key"),
             "base_url": runtime_kwargs.get("base_url"),
             "provider": runtime_kwargs.get("provider"),
@@ -1144,46 +1118,11 @@ class GatewayRunner:
             "args": list(runtime_kwargs.get("args") or []),
             "credential_pool": runtime_kwargs.get("credential_pool"),
         }
-
-        resolved = None
-        try:
-            from agent import smart_model_routing
-
-            resolved = smart_model_routing.resolve_turn_route(
-                user_message,
-                getattr(self, "_smart_model_routing", None),
-                primary,
-            )
-        except Exception:
-            resolved = None
-
-        resolved_runtime = None
-        if isinstance(resolved, dict):
-            candidate = resolved.get("runtime")
-            if isinstance(candidate, dict):
-                resolved_runtime = candidate
-
-        runtime = {
-            "api_key": (resolved_runtime or {}).get("api_key", primary["api_key"]),
-            "base_url": (resolved_runtime or {}).get("base_url", primary["base_url"]),
-            "provider": (resolved_runtime or {}).get("provider", primary["provider"]),
-            "api_mode": (resolved_runtime or {}).get("api_mode", primary["api_mode"]),
-            "command": (resolved_runtime or {}).get("command", primary["command"]),
-            "args": list((resolved_runtime or {}).get("args", primary["args"]) or []),
-            "credential_pool": (resolved_runtime or {}).get(
-                "credential_pool", primary["credential_pool"]
-            ),
-        }
-
-        routed_model = model
-        if isinstance(resolved, dict) and resolved.get("model"):
-            routed_model = resolved.get("model")
-
         route = {
-            "model": routed_model,
+            "model": model,
             "runtime": runtime,
             "signature": (
-                routed_model,
+                model,
                 runtime["provider"],
                 runtime["base_url"],
                 runtime["api_mode"],
@@ -3814,17 +3753,12 @@ class GatewayRunner:
         if event.media_urls:
             image_paths = []
             audio_paths = []
-            video_paths = []
             for i, path in enumerate(event.media_urls):
                 mtype = event.media_types[i] if i < len(event.media_types) else ""
                 if mtype.startswith("image/") or event.message_type == MessageType.PHOTO:
                     image_paths.append(path)
                 if mtype.startswith("audio/") or event.message_type in (MessageType.VOICE, MessageType.AUDIO):
                     audio_paths.append(path)
-                if mtype.startswith("video/") or event.message_type == MessageType.VIDEO:
-                    video_paths.append(path)
-
-            stt_warning_sent = False
 
             if image_paths:
                 message_text = await self._enrich_message_with_vision(
@@ -3863,65 +3797,20 @@ class GatewayRunner:
                                 _stt_msg,
                                 metadata=_stt_meta,
                             )
-                            stt_warning_sent = True
-                        except Exception:
-                            pass
-
-            if video_paths:
-                _video_context = "\n\n".join(
-                    f"[The user sent a video file. Local cached path: {path}]"
-                    for path in video_paths
-                )
-                message_text = f"{_video_context}\n\n{message_text}" if message_text else _video_context
-                message_text = await self._enrich_message_with_video_visual_context(
-                    message_text,
-                    video_paths,
-                )
-                message_text = await self._enrich_message_with_transcription(
-                    message_text,
-                    video_paths,
-                )
-                _stt_fail_markers = (
-                    "No STT provider",
-                    "STT is disabled",
-                    "can't listen",
-                    "VOICE_TOOLS_OPENAI_KEY",
-                )
-                if (not stt_warning_sent) and any(marker in message_text for marker in _stt_fail_markers):
-                    _stt_adapter = self.adapters.get(source.platform)
-                    _stt_meta = {"thread_id": source.thread_id} if source.thread_id else None
-                    if _stt_adapter:
-                        try:
-                            _stt_msg = (
-                                "🎬 I received your video but can't transcribe its audio — "
-                                "no speech-to-text provider is configured.\n\n"
-                                "To enable voice/video transcription: install faster-whisper "
-                                "(`pip install faster-whisper` in the Hermes venv) "
-                                "and set `stt.enabled: true` in config.yaml, "
-                                "then /restart the gateway."
-                            )
-                            if self._has_setup_skill():
-                                _stt_msg += "\n\nFor full setup instructions, type: `/skill hermes-agent-setup`"
-                            await _stt_adapter.send(
-                                source.chat_id,
-                                _stt_msg,
-                                metadata=_stt_meta,
-                            )
                         except Exception:
                             pass
 
         if event.media_urls and event.message_type == MessageType.DOCUMENT:
             import mimetypes as _mimetypes
 
-            _MAX_TEXT_INJECT_BYTES = 100 * 1024
-
+            _TEXT_EXTENSIONS = {".txt", ".md", ".csv", ".log", ".json", ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg"}
             for i, path in enumerate(event.media_urls):
                 mtype = event.media_types[i] if i < len(event.media_types) else ""
                 if mtype in ("", "application/octet-stream"):
                     import os as _os2
 
                     _ext = _os2.path.splitext(path)[1].lower()
-                    if _ext in TEXT_DOCUMENT_EXTENSIONS:
+                    if _ext in _TEXT_EXTENSIONS:
                         mtype = "text/plain"
                     else:
                         guessed, _ = _mimetypes.guess_type(path)
@@ -3938,33 +3827,11 @@ class GatewayRunner:
                 display_name = parts[2] if len(parts) >= 3 else basename
                 display_name = _re.sub(r'[^\w.\- ]', '_', display_name)
 
-                if is_text_document_mime(mtype):
-                    injected_text = ""
-                    try:
-                        if _os.path.getsize(path) <= _MAX_TEXT_INJECT_BYTES:
-                            with open(path, "rb") as _fh:
-                                raw = _fh.read()
-                            injected_text = raw.decode("utf-8")
-                    except Exception:
-                        injected_text = ""
-
-                    if injected_text:
-                        context_note = (
-                            f"[The user sent a text document: '{display_name}'. "
-                            f"Its content has been included below. "
-                            f"The file is also saved at: {path}]"
-                        )
-                        injected_block = f"[Content of {display_name}]:\n{injected_text}"
-                        if message_text:
-                            message_text = f"{context_note}\n\n{injected_block}\n\n{message_text}"
-                        else:
-                            message_text = f"{context_note}\n\n{injected_block}"
-                        continue
-
+                if mtype.startswith("text/"):
                     context_note = (
                         f"[The user sent a text document: '{display_name}'. "
-                        f"The file is saved at: {path}. "
-                        f"Ask the user if they want a focused summary or extraction.]"
+                        f"Its content has been included below. "
+                        f"The file is also saved at: {path}]"
                     )
                 else:
                     context_note = (
@@ -5562,14 +5429,12 @@ class GatewayRunner:
                             f"via {result.provider_label or result.target_provider}. "
                             f"Adjust your self-identification accordingly.]"
                         )
-                        _pool = _load_provider_credential_pool(result.target_provider)
                         _self._session_model_overrides[_session_key] = {
                             "model": result.new_model,
                             "provider": result.target_provider,
                             "api_key": result.api_key,
                             "base_url": result.base_url,
                             "api_mode": result.api_mode,
-                            "credential_pool": _pool,
                         }
 
                         # Evict cached agent so the next turn creates a fresh
@@ -5682,14 +5547,12 @@ class GatewayRunner:
         )
 
         # Store session override so next agent creation uses the new model
-        _pool = _load_provider_credential_pool(result.target_provider)
         self._session_model_overrides[session_key] = {
             "model": result.new_model,
             "provider": result.target_provider,
             "api_key": result.api_key,
             "base_url": result.base_url,
             "api_mode": result.api_mode,
-            "credential_pool": _pool,
         }
 
         # Evict cached agent so the next turn creates a fresh agent from the
@@ -8243,47 +8106,6 @@ class GatewayRunner:
             return prefix
         return user_text
 
-    async def _enrich_message_with_video_visual_context(
-        self,
-        user_text: str,
-        video_paths: List[str],
-    ) -> str:
-        """Sample key video frames and prepend visual observations to message text."""
-        from tools.video_enrichment import summarize_video_visual_context
-
-        enriched_parts = []
-        for path in video_paths:
-            try:
-                logger.debug("Auto-analyzing user video frames: %s", path)
-                result = await summarize_video_visual_context(path)
-                if result.get("success"):
-                    summary = (result.get("summary") or "").strip()
-                    if summary:
-                        enriched_parts.append(
-                            "[The user sent a video file. "
-                            f"Sampled visual context from key frames:\n{summary}]"
-                        )
-                    continue
-
-                error = result.get("error", "frame analysis unavailable")
-                enriched_parts.append(
-                    "[The user sent a video file, but automatic frame-based visual "
-                    f"analysis was unavailable ({error}).]"
-                )
-            except Exception as e:
-                logger.error("Video visual auto-analysis error: %s", e)
-                enriched_parts.append(
-                    "[The user sent a video file, but something went wrong when I "
-                    "tried to sample visual frames.]"
-                )
-
-        if enriched_parts:
-            prefix = "\n\n".join(enriched_parts)
-            if user_text:
-                return f"{prefix}\n\n{user_text}"
-            return prefix
-        return user_text
-
     async def _enrich_message_with_transcription(
         self,
         user_text: str,
@@ -8677,7 +8499,7 @@ class GatewayRunner:
         if not override:
             return model, runtime_kwargs
         model = override.get("model", model)
-        for key in ("provider", "api_key", "base_url", "api_mode", "credential_pool"):
+        for key in ("provider", "api_key", "base_url", "api_mode"):
             val = override.get(key)
             if val is not None:
                 runtime_kwargs[key] = val

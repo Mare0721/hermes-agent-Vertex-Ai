@@ -626,7 +626,12 @@ def check_command_security(command: str) -> dict:
     if not cfg["tirith_enabled"]:
         return {"action": "allow", "findings": [], "summary": ""}
 
-    tirith_path = _resolve_tirith_path(cfg["tirith_path"])
+    # Keep command-path resolution non-blocking for request-time checks.
+    # ensure_installed() performs only fast local checks synchronously and,
+    # when needed, starts background install work without blocking this call.
+    tirith_path = ensure_installed(log_failures=False)
+    if not tirith_path:
+        tirith_path = os.path.expanduser(cfg["tirith_path"])
     timeout = cfg["tirith_timeout"]
     fail_open = cfg["tirith_fail_open"]
 

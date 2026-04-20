@@ -56,8 +56,6 @@ from gateway.platforms.base import (
     cache_audio_from_bytes,
     cache_document_from_bytes,
     SUPPORTED_DOCUMENT_TYPES,
-    resolve_supported_document_extension,
-    is_text_document_mime,
 )
 from tools.url_safety import is_safe_url
 
@@ -3120,7 +3118,13 @@ class DiscordAdapter(BasePlatformAdapter):
                     media_types.append(content_type)
             else:
                 # Document attachments: download, cache, and optionally inject text
-                ext = resolve_supported_document_extension(att.filename or "", content_type or "")
+                ext = ""
+                if att.filename:
+                    _, ext = os.path.splitext(att.filename)
+                    ext = ext.lower()
+                if not ext and content_type:
+                    mime_to_ext = {v: k for k, v in SUPPORTED_DOCUMENT_TYPES.items()}
+                    ext = mime_to_ext.get(content_type, "")
                 if ext not in SUPPORTED_DOCUMENT_TYPES:
                     logger.warning(
                         "[Discord] Unsupported document type '%s' (%s), skipping",
@@ -3145,7 +3149,7 @@ class DiscordAdapter(BasePlatformAdapter):
                             logger.info("[Discord] Cached user document: %s", cached_path)
                             # Inject text content for plain-text documents (capped at 100 KB)
                             MAX_TEXT_INJECT_BYTES = 100 * 1024
-                            if is_text_document_mime(doc_mime) and len(raw_bytes) <= MAX_TEXT_INJECT_BYTES:
+                            if ext in (".md", ".txt", ".log") and len(raw_bytes) <= MAX_TEXT_INJECT_BYTES:
                                 try:
                                     text_content = raw_bytes.decode("utf-8")
                                     display_name = att.filename or f"document{ext}"

@@ -25,33 +25,6 @@ def test_resolve_runtime_provider_uses_credential_pool(monkeypatch):
     assert resolved["source"] == "manual"
 
 
-def test_resolve_runtime_provider_uses_exhausted_pool_fallback(monkeypatch):
-    class _Entry:
-        access_token = "fallback-token"
-        source = "manual"
-        base_url = "https://aiplatform.googleapis.com/v1/projects/demo/locations/global/publishers/google/models"
-
-    class _Pool:
-        def has_credentials(self):
-            return True
-
-        def select(self):
-            return None
-
-        def select_with_exhausted_fallback(self):
-            return _Entry()
-
-    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "vertex")
-    monkeypatch.setattr(rp, "load_pool", lambda provider: _Pool())
-
-    resolved = rp.resolve_runtime_provider(requested="vertex")
-
-    assert resolved["provider"] == "vertex"
-    assert resolved["api_key"] == "fallback-token"
-    assert resolved["credential_pool"] is not None
-    assert resolved["source"] == "manual"
-
-
 def test_resolve_runtime_provider_anthropic_pool_respects_config_base_url(monkeypatch):
     class _Entry:
         access_token = "pool-token"

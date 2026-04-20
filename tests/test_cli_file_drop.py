@@ -106,25 +106,6 @@ class TestImageFileDrop:
         assert result["is_image"] is True
 
 
-class TestVideoFileDrop:
-    @pytest.mark.parametrize("ext", [".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".3gp"])
-    def test_all_video_extensions(self, tmp_path, ext):
-        vid = tmp_path / f"clip{ext}"
-        vid.write_bytes(b"fake")
-        result = _detect_file_drop(str(vid))
-        assert result is not None
-        assert result["is_video"] is True
-        assert result["is_image"] is False
-
-    def test_video_with_trailing_text(self, tmp_path):
-        vid = tmp_path / "demo.mp4"
-        vid.write_bytes(b"fake")
-        result = _detect_file_drop(f"{vid} summarize this")
-        assert result is not None
-        assert result["is_video"] is True
-        assert result["remainder"] == "summarize this"
-
-
 # ---------------------------------------------------------------------------
 # Tests: non-image file detection
 # ---------------------------------------------------------------------------

@@ -1197,11 +1197,6 @@ _IMAGE_EXTENSIONS = frozenset({
     '.bmp', '.tiff', '.tif', '.svg', '.ico',
 })
 
-_VIDEO_EXTENSIONS = frozenset({
-    '.mp4', '.mov', '.avi', '.mkv', '.webm',
-    '.m4v', '.3gp', '.mpeg', '.mpg',
-})
-
 
 from hermes_constants import is_termux as _is_termux_environment
 
@@ -1349,7 +1344,6 @@ def _detect_file_drop(user_input: str) -> "dict | None":
         {
             "path": Path,          # resolved file path
             "is_image": bool,      # True when suffix is a known image type
-            "is_video": bool,      # True when suffix is a known video type
             "remainder": str,      # any text after the path
         }
 
@@ -1385,7 +1379,6 @@ def _detect_file_drop(user_input: str) -> "dict | None":
     return {
         "path": drop_path,
         "is_image": drop_path.suffix.lower() in _IMAGE_EXTENSIONS,
-        "is_video": drop_path.suffix.lower() in _VIDEO_EXTENSIONS,
         "remainder": remainder,
     }
 
@@ -1428,24 +1421,16 @@ def _should_auto_attach_clipboard_image_on_paste(pasted_text: str) -> bool:
     return not pasted_text.strip()
 
 
-def _collect_query_media(
-    query: str | None,
-    image_arg: str | None = None,
-    video_arg: str | None = None,
-) -> tuple[str, list[Path], list[Path]]:
-    """Collect local image/video attachments for single-query CLI flows."""
+def _collect_query_images(query: str | None, image_arg: str | None = None) -> tuple[str, list[Path]]:
+    """Collect local image attachments for single-query CLI flows."""
     message = query or ""
     images: list[Path] = []
-    videos: list[Path] = []
 
     if isinstance(message, str):
         dropped = _detect_file_drop(message)
         if dropped and dropped.get("is_image"):
             images.append(dropped["path"])
             message = dropped["remainder"] or f"[User attached image: {dropped['path'].name}]"
-        elif dropped and dropped.get("is_video"):
-            videos.append(dropped["path"])
-            message = dropped["remainder"] or f"[User attached video: {dropped['path'].name}]"
 
     if image_arg:
         explicit_path = _resolve_attachment_path(image_arg)
@@ -1455,14 +1440,6 @@ def _collect_query_media(
             raise ValueError(f"Not a supported image file: {explicit_path}")
         images.append(explicit_path)
 
-    if video_arg:
-        explicit_video = _resolve_attachment_path(video_arg)
-        if explicit_video is None:
-            raise ValueError(f"Video file not found: {video_arg}")
-        if explicit_video.suffix.lower() not in _VIDEO_EXTENSIONS:
-            raise ValueError(f"Not a supported video file: {explicit_video}")
-        videos.append(explicit_video)
-
     deduped: list[Path] = []
     seen: set[str] = set()
     for img in images:
@@ -1471,23 +1448,7 @@ def _collect_query_media(
             continue
         seen.add(key)
         deduped.append(img)
-
-    deduped_videos: list[Path] = []
-    seen_videos: set[str] = set()
-    for vid in videos:
-        key = str(vid)
-        if key in seen_videos:
-            continue
-        seen_videos.add(key)
-        deduped_videos.append(vid)
-
-    return message, deduped, deduped_videos
-
-
-def _collect_query_images(query: str | None, image_arg: str | None = None) -> tuple[str, list[Path]]:
-    """Backward-compatible wrapper used by existing image-only tests."""
-    message, images, _videos = _collect_query_media(query, image_arg=image_arg)
-    return message, images
+    return message, deduped
 
 
 class ChatConsole:
@@ -3129,8 +3090,7 @@ class HermesCLI:
         """
         from hermes_cli.models import resolve_fast_mode_overrides
 
-        primary = {
-            "model": self.model,
+        runtime = {
             "api_key": self.api_key,
             "base_url": self.base_url,
             "provider": self.provider,
@@ -3139,46 +3099,11 @@ class HermesCLI:
             "args": list(self.acp_args or []),
             "credential_pool": getattr(self, "_credential_pool", None),
         }
-
-        resolved = None
-        try:
-            from agent import smart_model_routing
-
-            resolved = smart_model_routing.resolve_turn_route(
-                user_message,
-                getattr(self, "_smart_model_routing", None),
-                primary,
-            )
-        except Exception:
-            resolved = None
-
-        resolved_runtime = None
-        if isinstance(resolved, dict):
-            candidate = resolved.get("runtime")
-            if isinstance(candidate, dict):
-                resolved_runtime = candidate
-
-        runtime = {
-            "api_key": (resolved_runtime or {}).get("api_key", primary["api_key"]),
-            "base_url": (resolved_runtime or {}).get("base_url", primary["base_url"]),
-            "provider": (resolved_runtime or {}).get("provider", primary["provider"]),
-            "api_mode": (resolved_runtime or {}).get("api_mode", primary["api_mode"]),
-            "command": (resolved_runtime or {}).get("command", primary["command"]),
-            "args": list((resolved_runtime or {}).get("args", primary["args"]) or []),
-            "credential_pool": (resolved_runtime or {}).get(
-                "credential_pool", primary["credential_pool"]
-            ),
-        }
-
-        routed_model = self.model
-        if isinstance(resolved, dict) and resolved.get("model"):
-            routed_model = resolved.get("model")
-
         route = {
-            "model": routed_model,
+            "model": self.model,
             "runtime": runtime,
             "signature": (
-                routed_model,
+                self.model,
                 runtime["provider"],
                 runtime["base_url"],
                 runtime["api_mode"],
@@ -4063,88 +3988,6 @@ class HermesCLI:
             prefix = "\n\n".join(enriched_parts)
             return f"{prefix}\n\n{user_text}" if user_text else prefix
         return user_text or "What do you see in this image?"
-
-    def _preprocess_videos_with_transcription(self, text: str, videos: list, *, announce: bool = True) -> str:
-        """Extract speech context from attached videos and prepend it to text."""
-        import asyncio as _asyncio
-        from tools.transcription_tools import transcribe_audio
-        from tools.video_enrichment import summarize_video_visual_context
-
-        enriched_parts = []
-        for video_path in videos:
-            if not video_path.exists():
-                continue
-
-            size_mb = video_path.stat().st_size / (1024 * 1024)
-            if announce:
-                _cprint(f"  {_DIM}🎬 analyzing {video_path.name} ({size_mb:.1f}MB)...{_RST}")
-
-            try:
-                visual_result = _asyncio.run(
-                    summarize_video_visual_context(str(video_path))
-                )
-                if visual_result.get("success"):
-                    visual_summary = (visual_result.get("summary") or "").strip()
-                    if visual_summary:
-                        enriched_parts.append(
-                            f"[The user attached a video file: {video_path}. "
-                            f"Sampled visual context:\n{visual_summary}]"
-                        )
-                        if announce:
-                            _cprint(f"  {_DIM}✓ video frames analyzed{_RST}")
-                else:
-                    visual_error = visual_result.get("error", "frame analysis unavailable")
-                    enriched_parts.append(
-                        f"[The user attached a video file at {video_path}, but "
-                        f"automatic frame-based visual analysis was unavailable ({visual_error}).]"
-                    )
-                    if announce:
-                        _cprint(f"  {_DIM}⚠ video frame analysis unavailable — path included for retry{_RST}")
-            except Exception as e:
-                enriched_parts.append(
-                    f"[The user attached a video file at {video_path}, but "
-                    f"visual frame analysis failed ({e}).]"
-                )
-                if announce:
-                    _cprint(f"  {_DIM}⚠ video frame analysis error — path included for retry{_RST}")
-
-            try:
-                result = transcribe_audio(str(video_path))
-                if result.get("success"):
-                    transcript = (result.get("transcript") or "").strip()
-                    if transcript:
-                        enriched_parts.append(
-                            f"[The user attached a video file: {video_path}. "
-                            f"Extracted audio transcript:\n{transcript}]"
-                        )
-                    else:
-                        enriched_parts.append(
-                            f"[The user attached a video file: {video_path}. "
-                            "No speech was detected in its audio track.]"
-                        )
-                    if announce:
-                        _cprint(f"  {_DIM}✓ video audio transcribed{_RST}")
-                else:
-                    error = result.get("error", "unknown error")
-                    enriched_parts.append(
-                        f"[The user attached a video file at {video_path}, but automatic "
-                        f"transcription failed ({error}). You can still inspect it manually.]"
-                    )
-                    if announce:
-                        _cprint(f"  {_DIM}⚠ video transcription failed — path included for retry{_RST}")
-            except Exception as e:
-                enriched_parts.append(
-                    f"[The user attached a video file at {video_path}, but "
-                    f"transcription failed ({e}).]"
-                )
-                if announce:
-                    _cprint(f"  {_DIM}⚠ video transcription error — path included for retry{_RST}")
-
-        user_text = text if isinstance(text, str) and text else ""
-        if enriched_parts:
-            prefix = "\n\n".join(enriched_parts)
-            return f"{prefix}\n\n{user_text}" if user_text else prefix
-        return user_text
 
     def _show_tool_availability_warnings(self):
         """Show warnings about disabled tools due to missing API keys."""
@@ -8254,7 +8097,7 @@ class HermesCLI:
             except Exception:
                 pass
 
-    def chat(self, message, images: list = None, videos: list = None) -> Optional[str]:
+    def chat(self, message, images: list = None) -> Optional[str]:
         """
         Send a message to the agent and get a response.
         
@@ -8269,7 +8112,6 @@ class HermesCLI:
         Args:
             message: The user's message (str or multimodal content list)
             images: Optional list of Path objects for attached images
-            videos: Optional list of Path objects for attached videos
             
         Returns:
             The agent's response, or None on error
@@ -8296,13 +8138,6 @@ class HermesCLI:
         ):
             return None
         
-        # Pre-process videos with STT so any speech track is immediately
-        # available as text context for the main model.
-        if videos:
-            message = self._preprocess_videos_with_transcription(
-                message if isinstance(message, str) else "", videos
-            )
-
         # Pre-process images through the vision tool (Gemini Flash) so the
         # main model receives text descriptions instead of raw base64 image
         # content — works with any model, not just vision-capable ones.
@@ -10423,16 +10258,10 @@ class HermesCLI:
                     if not user_input:
                         continue
 
-                    # Unpack media payload: (text, [images], [videos]) or plain str
+                    # Unpack image payload: (text, [Path, ...]) or plain str
                     submit_images = []
-                    submit_videos = []
                     if isinstance(user_input, tuple):
-                        if len(user_input) == 3:
-                            user_input, submit_images, submit_videos = user_input
-                        elif len(user_input) == 2:
-                            user_input, submit_images = user_input
-                        elif len(user_input) == 1:
-                            user_input = user_input[0]
+                        user_input, submit_images = user_input
                     
                     # Check for commands — but detect dragged/pasted file paths first.
                     # See _detect_file_drop() for details.
@@ -10444,10 +10273,6 @@ class HermesCLI:
                             submit_images.append(_drop_path)
                             user_input = _remainder or f"[User attached image: {_drop_path.name}]"
                             _cprint(f"  📎 Auto-attached image: {_drop_path.name}")
-                        elif _file_drop.get("is_video"):
-                            submit_videos.append(_drop_path)
-                            user_input = _remainder or f"[User attached video: {_drop_path.name}]"
-                            _cprint(f"  🎬 Auto-attached video: {_drop_path.name}")
                         else:
                             _cprint(f"  📄 Detected file: {_drop_path.name}")
                             user_input = (
@@ -10477,20 +10302,13 @@ class HermesCLI:
                     if submit_images:
                         n = len(submit_images)
                         _cprint(f"  {_DIM}📎 {n} image{'s' if n > 1 else ''} attached{_RST}")
-                    if submit_videos:
-                        n = len(submit_videos)
-                        _cprint(f"  {_DIM}🎬 {n} video{'s' if n > 1 else ''} attached{_RST}")
 
                     # Regular chat - run agent
                     self._agent_running = True
                     app.invalidate()  # Refresh status line
 
                     try:
-                        self.chat(
-                            user_input,
-                            images=submit_images or None,
-                            videos=submit_videos or None,
-                        )
+                        self.chat(user_input, images=submit_images or None)
                     finally:
                         self._agent_running = False
                         self._spinner_text = ""
@@ -10709,7 +10527,6 @@ def main(
     query: str = None,
     q: str = None,
     image: str = None,
-    video: str = None,
     toolsets: str = None,
     skills: str | list[str] | tuple[str, ...] = None,
     model: str = None,
@@ -10736,7 +10553,6 @@ def main(
         query: Single query to execute (then exit). Alias: -q
         q: Shorthand for --query
         image: Optional local image path to attach to a single query
-        video: Optional local video path to attach to a single query
         toolsets: Comma-separated list of toolsets to enable (e.g., "web,terminal")
         skills: Comma-separated or repeated list of skills to preload for the session
         model: Model to use (default: anthropic/claude-opus-4-20250514)
@@ -10758,7 +10574,6 @@ def main(
         python cli.py --skills hermes-agent-dev,github-auth
         python cli.py -q "What is Python?"       # Single query mode
         python cli.py -q "Describe this" --image ~/storage/shared/Pictures/cat.png
-        python cli.py -q "Summarize this video" --video ~/Videos/demo.mp4
         python cli.py --list-tools               # List tools and exit
         python cli.py --resume 20260225_143052_a1b2c3  # Resume session
         python cli.py -w                         # Start in isolated git worktree
@@ -10920,27 +10735,17 @@ def main(
         pass  # signal handler may fail in restricted environments
     
     # Handle single query mode
-    if query or image or video:
-        query, single_query_images, single_query_videos = _collect_query_media(
-            query,
-            image_arg=image,
-            video_arg=video,
-        )
+    if query or image:
+        query, single_query_images = _collect_query_images(query, image)
         if quiet:
             # Quiet mode: suppress banner, spinner, tool previews.
             # Only print the final response and parseable session info.
             cli.tool_progress_mode = "off"
             if cli._ensure_runtime_credentials():
                 effective_query = query
-                if single_query_videos:
-                    effective_query = cli._preprocess_videos_with_transcription(
-                        effective_query,
-                        single_query_videos,
-                        announce=False,
-                    )
                 if single_query_images:
                     effective_query = cli._preprocess_images_with_vision(
-                        effective_query,
+                        query,
                         single_query_images,
                         announce=False,
                     )
@@ -10985,16 +10790,10 @@ def main(
             sys.exit(1)
         else:
             cli.show_banner()
-            _query_label = query or (
-                "[media attached]" if (single_query_images or single_query_videos) else ""
-            )
+            _query_label = query or ("[image attached]" if single_query_images else "")
             if _query_label:
                 cli.console.print(f"[bold blue]Query:[/] {_query_label}")
-            cli.chat(
-                query,
-                images=single_query_images or None,
-                videos=single_query_videos or None,
-            )
+            cli.chat(query, images=single_query_images or None)
             cli._print_exit_summary()
         return
     

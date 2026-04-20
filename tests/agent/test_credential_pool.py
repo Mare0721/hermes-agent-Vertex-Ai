@@ -268,7 +268,7 @@ def test_explicit_reset_timestamp_overrides_default_429_ttl(tmp_path, monkeypatc
                         "label": "weekly-reset",
                         "auth_type": "oauth",
                         "priority": 0,
-                        "source": "device_code",
+                        "source": "manual:device_code",
                         "access_token": "tok-1",
                         "last_status": "exhausted",
                         "last_status_at": time.time() - 7200,
@@ -331,104 +331,6 @@ def test_mark_exhausted_and_rotate_persists_status(tmp_path, monkeypatch):
     persisted = auth_payload["credential_pool"]["anthropic"][0]
     assert persisted["last_status"] == "exhausted"
     assert persisted["last_error_code"] == 402
-
-
-def test_select_with_exhausted_fallback_honors_random_strategy(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
-    _write_auth_store(
-        tmp_path,
-        {
-            "version": 1,
-            "credential_pool": {
-                "vertex": [
-                    {
-                        "id": "cred-1",
-                        "label": "primary",
-                        "auth_type": "api_key",
-                        "priority": 0,
-                        "source": "manual",
-                        "access_token": "k1",
-                        "last_status": "exhausted",
-                        "last_status_at": time.time(),
-                        "last_error_code": 429,
-                    },
-                    {
-                        "id": "cred-2",
-                        "label": "secondary",
-                        "auth_type": "api_key",
-                        "priority": 1,
-                        "source": "manual",
-                        "access_token": "k2",
-                        "last_status": "exhausted",
-                        "last_status_at": time.time(),
-                        "last_error_code": 429,
-                    },
-                ]
-            },
-        },
-    )
-    config_path = tmp_path / "hermes" / "config.yaml"
-    config_path.write_text("credential_pool_strategies:\n  vertex: random\n")
-
-    monkeypatch.setattr("agent.credential_pool.random.choice", lambda entries: entries[-1])
-
-    from agent.credential_pool import load_pool
-
-    pool = load_pool("vertex")
-    selected = pool.select_with_exhausted_fallback()
-
-    assert selected is not None
-    assert selected.id == "cred-2"
-
-
-def test_mark_exhausted_and_rotate_uses_exhausted_fallback_other_entry(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
-    _write_auth_store(
-        tmp_path,
-        {
-            "version": 1,
-            "credential_pool": {
-                "vertex": [
-                    {
-                        "id": "cred-1",
-                        "label": "primary",
-                        "auth_type": "api_key",
-                        "priority": 0,
-                        "source": "manual",
-                        "access_token": "k1",
-                        "last_status": "exhausted",
-                        "last_status_at": time.time(),
-                        "last_error_code": 429,
-                    },
-                    {
-                        "id": "cred-2",
-                        "label": "secondary",
-                        "auth_type": "api_key",
-                        "priority": 1,
-                        "source": "manual",
-                        "access_token": "k2",
-                        "last_status": "exhausted",
-                        "last_status_at": time.time(),
-                        "last_error_code": 429,
-                    },
-                ]
-            },
-        },
-    )
-    config_path = tmp_path / "hermes" / "config.yaml"
-    config_path.write_text("credential_pool_strategies:\n  vertex: round_robin\n")
-
-    from agent.credential_pool import load_pool
-
-    pool = load_pool("vertex")
-    first = pool.select_with_exhausted_fallback()
-    assert first is not None
-    assert first.id in {"cred-1", "cred-2"}
-
-    rotated = pool.mark_exhausted_and_rotate(status_code=429)
-    assert rotated is not None
-    if len(pool.entries()) > 1:
-        assert rotated.id != first.id
 
 
 def test_try_refresh_current_updates_only_current_entry(tmp_path, monkeypatch):

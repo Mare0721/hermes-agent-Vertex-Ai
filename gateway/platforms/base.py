@@ -566,90 +566,11 @@ SUPPORTED_DOCUMENT_TYPES = {
     ".md": "text/markdown",
     ".txt": "text/plain",
     ".log": "text/plain",
-    ".csv": "text/csv",
-    ".tsv": "text/tab-separated-values",
-    ".json": "application/json",
-    ".jsonl": "application/x-ndjson",
-    ".xml": "application/xml",
-    ".yaml": "application/x-yaml",
-    ".yml": "application/x-yaml",
-    ".toml": "application/toml",
-    ".ini": "text/plain",
-    ".cfg": "text/plain",
-    ".conf": "text/plain",
-    ".py": "text/x-python",
-    ".js": "text/javascript",
-    ".ts": "text/plain",
-    ".tsx": "text/plain",
-    ".jsx": "text/plain",
-    ".sql": "text/plain",
-    ".sh": "text/x-shellscript",
-    ".bash": "text/x-shellscript",
-    ".zsh": "text/x-shellscript",
-    ".html": "text/html",
-    ".css": "text/css",
-    ".rst": "text/x-rst",
-    ".diff": "text/plain",
-    ".patch": "text/plain",
-    ".resolved": "text/plain",
     ".zip": "application/zip",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 }
-
-# Suffix markers used by exported/derived files where the meaningful extension
-# appears before the trailing marker (for example, report.md.resolved).
-_DOCUMENT_TRAILING_MARKER_EXTS = frozenset({
-    ".resolved",
-})
-
-_TEXT_DOCUMENT_MIME_TYPES = frozenset({
-    "application/json",
-    "application/xml",
-    "application/x-yaml",
-    "application/toml",
-    "application/x-ndjson",
-})
-
-TEXT_DOCUMENT_EXTENSIONS = frozenset({
-    ext
-    for ext, mime in SUPPORTED_DOCUMENT_TYPES.items()
-    if mime.startswith("text/") or mime in _TEXT_DOCUMENT_MIME_TYPES
-})
-
-
-def resolve_supported_document_extension(filename: str, mime_type: str = "") -> str:
-    """Resolve a supported document extension from filename and MIME type.
-
-    Handles compound names with trailing marker suffixes such as
-    ``report.md.resolved`` by peeling marker suffixes until a known extension
-    is found.
-    """
-    candidate = str(filename or "").strip().lower()
-    while candidate:
-        stem, ext = os.path.splitext(candidate)
-        if not ext:
-            break
-        if ext in SUPPORTED_DOCUMENT_TYPES:
-            return ext
-        if ext in _DOCUMENT_TRAILING_MARKER_EXTS:
-            candidate = stem
-            continue
-        break
-
-    if mime_type:
-        mime_to_ext = {v: k for k, v in SUPPORTED_DOCUMENT_TYPES.items()}
-        return mime_to_ext.get(str(mime_type).strip().lower(), "")
-    return ""
-
-
-def is_text_document_mime(mime_type: str) -> bool:
-    """Return True when *mime_type* should be treated as text content."""
-    normalized = str(mime_type or "").strip().lower()
-    if not normalized:
-        return False
-    return normalized.startswith("text/") or normalized in _TEXT_DOCUMENT_MIME_TYPES
 
 
 def get_document_cache_dir() -> Path:

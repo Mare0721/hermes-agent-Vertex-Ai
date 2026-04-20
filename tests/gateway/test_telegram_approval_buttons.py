@@ -50,6 +50,12 @@ from gateway.platforms.telegram import TelegramAdapter
 from gateway.config import Platform, PlatformConfig
 
 
+@pytest.fixture(autouse=True)
+def _clear_allowed_users_env(monkeypatch):
+    """Keep callback-authorization tests hermetic across xdist workers."""
+    monkeypatch.delenv("TELEGRAM_ALLOWED_USERS", raising=False)
+
+
 def _make_adapter(extra=None):
     """Create a TelegramAdapter with mocked internals."""
     config = PlatformConfig(enabled=True, token="test-token", extra=extra or {})

@@ -1976,126 +1976,6 @@ def launchd_status(deep: bool = False):
 # Gateway Runner
 # =============================================================================
 
-def _env_flag(name: str, default: bool = False) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _configured_telegram_token() -> str | None:
-    token = (get_env_value("TELEGRAM_BOT_TOKEN") or "").strip()
-    if not token:
-        return None
-    if token.lower() in {"your-token-here", "changeme", "none", "null"}:
-        return None
-    return token
-
-
-def _python_can_import_module(python_path: str, module_name: str) -> bool:
-    result = subprocess.run(
-        [python_path, "-c", f"import {module_name}"],
-        cwd=PROJECT_ROOT,
-        capture_output=True,
-        text=True,
-    )
-    return result.returncode == 0
-
-
-def _ensure_telegram_messaging_dependencies() -> bool:
-    """Auto-install Telegram runtime deps when Telegram is configured."""
-    token = _configured_telegram_token()
-    if not token:
-        return True
-    if not _env_flag("HERMES_TELEGRAM_AUTO_INSTALL_DEPS", default=True):
-        return True
-
-    python_path = get_python_path()
-    if _python_can_import_module(python_path, "telegram"):
-        return True
-
-    print_warning("Telegram dependency missing (python-telegram-bot). Auto-repairing...")
-    # Best-effort: some minimal venvs lose pip after partial rebuilds.
-    subprocess.run(
-        [python_path, "-m", "ensurepip", "--upgrade", "--default-pip"],
-        cwd=PROJECT_ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    try:
-        subprocess.run(
-            [python_path, "-m", "pip", "install", "-e", ".[messaging]", "--quiet"],
-            cwd=PROJECT_ROOT,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except subprocess.CalledProcessError as exc:
-        stderr = (exc.stderr or "").strip()
-        stdout = (exc.stdout or "").strip()
-        details = stderr or stdout or str(exc)
-        print_error("Failed to auto-install Telegram messaging dependencies.")
-        print_info(f"  Details: {details}")
-        print_info(f"  Manual fix: {python_path} -m pip install -e '.[messaging]'")
-        return False
-
-    if not _python_can_import_module(python_path, "telegram"):
-        print_error("Telegram dependency still unavailable after auto-repair attempt.")
-        print_info(f"  Manual fix: {python_path} -m pip install -e '.[messaging]'")
-        return False
-
-    print_success("Telegram dependencies restored")
-    return True
-
-
-def _auto_takeover_telegram_token_lock() -> bool:
-    """Kill lock owner (if any) and release Telegram token lock before startup."""
-    token = _configured_telegram_token()
-    if not token:
-        return True
-    if not _env_flag("HERMES_TELEGRAM_FORCE_TAKEOVER", default=True):
-        return True
-
-    from gateway.status import read_scoped_lock, force_release_scoped_lock
-
-    lock = read_scoped_lock("telegram-bot-token", token)
-    if not lock:
-        return True
-
-    owner_pid = lock.get("pid") if isinstance(lock, dict) else None
-    if owner_pid == os.getpid():
-        return True
-
-    print_warning(
-        "Telegram token lock detected"
-        + (f" (owner PID {owner_pid})" if owner_pid else "")
-        + "; taking over lock and restarting owner process."
-    )
-    ok, _existing, reason = force_release_scoped_lock(
-        "telegram-bot-token",
-        token,
-        terminate_owner=True,
-        force_kill=True,
-    )
-    if not ok:
-        print_error("Failed to take over Telegram token lock")
-        print_info(f"  Reason: {reason}")
-        return False
-
-    print_success("Telegram token lock cleared")
-    return True
-
-
-def _gateway_start_preflight() -> bool:
-    """Self-heal checks before launching the gateway runtime."""
-    if not _ensure_telegram_messaging_dependencies():
-        return False
-    if not _auto_takeover_telegram_token_lock():
-        return False
-    return True
-
 def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False):
     """Run the gateway in foreground.
     
@@ -2107,9 +1987,6 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False):
                  hasn't fully exited yet.
     """
     sys.path.insert(0, str(PROJECT_ROOT))
-
-    if not _gateway_start_preflight():
-        sys.exit(1)
     
     from gateway.run import start_gateway
     

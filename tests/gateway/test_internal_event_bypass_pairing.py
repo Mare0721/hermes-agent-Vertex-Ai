@@ -19,6 +19,26 @@ from gateway.run import GatewayRunner
 from gateway.session import SessionSource
 
 
+@pytest.fixture(autouse=True)
+def _clear_auth_allowlist_env(monkeypatch):
+    """Keep pairing behavior tests hermetic across xdist workers."""
+    for key in (
+        "DISCORD_ALLOW_ALL_USERS",
+        "DISCORD_ALLOWED_USERS",
+        "GATEWAY_ALLOW_ALL_USERS",
+        "GATEWAY_ALLOWED_USERS",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_pairing_store(monkeypatch, tmp_path):
+    """Use a per-test pairing store directory instead of shared ~/.hermes state."""
+    import gateway.pairing as pairing_mod
+
+    monkeypatch.setattr(pairing_mod, "PAIRING_DIR", tmp_path / "pairing")
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

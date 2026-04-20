@@ -678,62 +678,6 @@ class CredentialPool:
         with self._lock:
             return self._select_unlocked()
 
-    def _select_exhausted_fallback_unlocked(
-        self,
-        *,
-        avoid_entry_id: Optional[str] = None,
-    ) -> Optional[PooledCredential]:
-        if not self._entries:
-            return None
-
-        candidates = list(self._entries)
-        if avoid_entry_id and len(candidates) > 1:
-            filtered = [entry for entry in candidates if entry.id != avoid_entry_id]
-            if filtered:
-                candidates = filtered
-
-        def _cooldown_until(entry: PooledCredential) -> float:
-            until = _exhausted_until(entry)
-            if until is None:
-                return 0.0
-            return float(until)
-
-        chosen: PooledCredential
-        if self._strategy == STRATEGY_RANDOM and len(candidates) > 1:
-            chosen = random.choice(candidates)
-        elif self._strategy == STRATEGY_LEAST_USED and len(candidates) > 1:
-            chosen = min(candidates, key=lambda entry: (entry.request_count, entry.priority))
-        elif self._strategy == STRATEGY_ROUND_ROBIN and len(candidates) > 1:
-            chosen = min(candidates, key=lambda entry: entry.priority)
-            rotated = [entry for entry in self._entries if entry.id != chosen.id]
-            rotated.append(replace(chosen, priority=len(self._entries) - 1))
-            self._entries = [replace(entry, priority=idx) for idx, entry in enumerate(rotated)]
-            self._persist()
-            chosen = next((entry for entry in self._entries if entry.id == chosen.id), chosen)
-        else:
-            chosen = min(candidates, key=lambda entry: (_cooldown_until(entry), entry.priority))
-
-        self._current_id = chosen.id
-        remaining = max(0.0, _cooldown_until(chosen) - time.time())
-        logger.warning(
-            "credential pool: all entries exhausted; using %s as emergency fallback (cooldown %.1fs)",
-            chosen.label or chosen.id[:8],
-            remaining,
-        )
-        return chosen
-
-    def select_with_exhausted_fallback(self) -> Optional[PooledCredential]:
-        """Select a credential, falling back to an exhausted one if necessary.
-
-        This keeps runtime initialization from failing with "no API key found"
-        when every pooled credential is temporarily cooling down.
-        """
-        with self._lock:
-            selected = self._select_unlocked()
-            if selected is not None:
-                return selected
-            return self._select_exhausted_fallback_unlocked()
-
     def _available_entries(self, *, clear_expired: bool = False, refresh: bool = False) -> List[PooledCredential]:
         """Return entries not currently in exhaustion cooldown.
 
@@ -836,8 +780,6 @@ class CredentialPool:
             self._mark_exhausted(entry, status_code, error_context)
             self._current_id = None
             next_entry = self._select_unlocked()
-            if next_entry is None:
-                next_entry = self._select_exhausted_fallback_unlocked(avoid_entry_id=entry.id)
             if next_entry:
                 _next_label = next_entry.label or next_entry.id[:8]
                 logger.info("credential pool: rotated to %s", _next_label)

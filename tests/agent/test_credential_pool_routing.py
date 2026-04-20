@@ -1,129 +1,25 @@
-"""Tests for credential pool preservation through smart routing and 429 recovery.
+"""Tests for credential pool preservation through turn config and 429 recovery.
 
 Covers:
-1. credential_pool flows through resolve_turn_route (no-route and fallback paths)
-2. CLI _resolve_turn_agent_config passes credential_pool to primary dict
-3. Gateway _resolve_turn_agent_config passes credential_pool to primary dict
-4. Eager fallback deferred when credential pool has credentials
-5. Eager fallback fires when no credential pool exists
-6. Full 429 rotation cycle: immediate rotate → exhaust → fallback
+1. CLI _resolve_turn_agent_config passes credential_pool to runtime dict
+2. Gateway _resolve_turn_agent_config passes credential_pool to runtime dict
+3. Eager fallback deferred when credential pool has credentials
+4. Eager fallback fires when no credential pool exists
+5. Full 429 rotation cycle: retry-same → rotate → exhaust → fallback
 """
 
-import os
-import time
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch, PropertyMock
-
-import pytest
+from unittest.mock import MagicMock, patch
 
 
 # ---------------------------------------------------------------------------
-# 1. smart_model_routing: credential_pool preserved in no-route path
-# ---------------------------------------------------------------------------
-
-class TestSmartRoutingPoolPreservation:
-    def test_no_route_preserves_credential_pool(self):
-        from agent.smart_model_routing import resolve_turn_route
-
-        fake_pool = MagicMock(name="CredentialPool")
-        primary = {
-            "model": "gpt-5.4",
-            "api_key": "sk-test",
-            "base_url": None,
-            "provider": "openai-codex",
-            "api_mode": "codex_responses",
-            "command": None,
-            "args": [],
-            "credential_pool": fake_pool,
-        }
-        # routing disabled
-        result = resolve_turn_route("hello", None, primary)
-        assert result["runtime"]["credential_pool"] is fake_pool
-
-    def test_no_route_none_pool(self):
-        from agent.smart_model_routing import resolve_turn_route
-
-        primary = {
-            "model": "gpt-5.4",
-            "api_key": "sk-test",
-            "base_url": None,
-            "provider": "openai-codex",
-            "api_mode": "codex_responses",
-            "command": None,
-            "args": [],
-        }
-        result = resolve_turn_route("hello", None, primary)
-        assert result["runtime"]["credential_pool"] is None
-
-    def test_routing_disabled_preserves_pool(self):
-        from agent.smart_model_routing import resolve_turn_route
-
-        fake_pool = MagicMock(name="CredentialPool")
-        primary = {
-            "model": "gpt-5.4",
-            "api_key": "sk-test",
-            "base_url": None,
-            "provider": "openai-codex",
-            "api_mode": "codex_responses",
-            "command": None,
-            "args": [],
-            "credential_pool": fake_pool,
-        }
-        # routing explicitly disabled
-        result = resolve_turn_route("hello", {"enabled": False}, primary)
-        assert result["runtime"]["credential_pool"] is fake_pool
-
-    def test_route_fallback_on_resolve_error_preserves_pool(self, monkeypatch):
-        """When smart routing picks a cheap model but resolve_runtime_provider
-        fails, the fallback to primary must still include credential_pool."""
-        from agent.smart_model_routing import resolve_turn_route
-
-        fake_pool = MagicMock(name="CredentialPool")
-        primary = {
-            "model": "gpt-5.4",
-            "api_key": "sk-test",
-            "base_url": None,
-            "provider": "openai-codex",
-            "api_mode": "codex_responses",
-            "command": None,
-            "args": [],
-            "credential_pool": fake_pool,
-        }
-        routing_config = {
-            "enabled": True,
-            "cheap_model": "openai/gpt-4.1-mini",
-            "cheap_provider": "openrouter",
-            "max_tokens": 200,
-            "patterns": ["^(hi|hello|hey)"],
-        }
-        # Force resolve_runtime_provider to fail so it falls back to primary
-        monkeypatch.setattr(
-            "hermes_cli.runtime_provider.resolve_runtime_provider",
-            MagicMock(side_effect=RuntimeError("no credentials")),
-        )
-        result = resolve_turn_route("hi", routing_config, primary)
-        assert result["runtime"]["credential_pool"] is fake_pool
-
-
-# ---------------------------------------------------------------------------
-# 2 & 3. CLI and Gateway _resolve_turn_agent_config include credential_pool
+# 1. CLI _resolve_turn_agent_config includes credential_pool
 # ---------------------------------------------------------------------------
 
 class TestCliTurnRoutePool:
-    def test_resolve_turn_includes_pool(self, monkeypatch, tmp_path):
-        """CLI's _resolve_turn_agent_config must pass credential_pool to primary."""
-        from agent.smart_model_routing import resolve_turn_route
-        captured = {}
-
-        def spy_resolve(user_message, routing_config, primary):
-            captured["primary"] = primary
-            return resolve_turn_route(user_message, routing_config, primary)
-
-        monkeypatch.setattr(
-            "agent.smart_model_routing.resolve_turn_route", spy_resolve
-        )
-
-        # Build a minimal HermesCLI-like object with the method
+    def test_resolve_turn_includes_pool(self):
+        """CLI's _resolve_turn_agent_config must pass credential_pool in runtime."""
+        fake_pool = MagicMock(name="FakePool")
         shell = SimpleNamespace(
             model="gpt-5.4",
             api_key="sk-test",
@@ -132,58 +28,46 @@ class TestCliTurnRoutePool:
             api_mode="codex_responses",
             acp_command=None,
             acp_args=[],
-            _credential_pool=MagicMock(name="FakePool"),
-            _smart_model_routing={"enabled": False},
+            _credential_pool=fake_pool,
+            service_tier=None,
         )
 
-        # Import and bind the real method
         from cli import HermesCLI
         bound = HermesCLI._resolve_turn_agent_config.__get__(shell)
-        bound("test message")
+        route = bound("test message")
 
-        assert "credential_pool" in captured["primary"]
-        assert captured["primary"]["credential_pool"] is shell._credential_pool
+        assert route["runtime"]["credential_pool"] is fake_pool
 
+
+# ---------------------------------------------------------------------------
+# 2. Gateway _resolve_turn_agent_config includes credential_pool
+# ---------------------------------------------------------------------------
 
 class TestGatewayTurnRoutePool:
-    def test_resolve_turn_includes_pool(self, monkeypatch):
+    def test_resolve_turn_includes_pool(self):
         """Gateway's _resolve_turn_agent_config must pass credential_pool."""
-        from agent.smart_model_routing import resolve_turn_route
-        captured = {}
-
-        def spy_resolve(user_message, routing_config, primary):
-            captured["primary"] = primary
-            return resolve_turn_route(user_message, routing_config, primary)
-
-        monkeypatch.setattr(
-            "agent.smart_model_routing.resolve_turn_route", spy_resolve
-        )
-
         from gateway.run import GatewayRunner
 
-        runner = SimpleNamespace(
-            _smart_model_routing={"enabled": False},
-        )
-
+        fake_pool = MagicMock(name="FakePool")
+        runner = SimpleNamespace(_service_tier=None)
         runtime_kwargs = {
-            "api_key": "sk-test",
+            "api_key": "***",
             "base_url": None,
             "provider": "openai-codex",
             "api_mode": "codex_responses",
             "command": None,
             "args": [],
-            "credential_pool": MagicMock(name="FakePool"),
+            "credential_pool": fake_pool,
         }
 
         bound = GatewayRunner._resolve_turn_agent_config.__get__(runner)
-        bound("test message", "gpt-5.4", runtime_kwargs)
+        route = bound("test message", "gpt-5.4", runtime_kwargs)
 
-        assert "credential_pool" in captured["primary"]
-        assert captured["primary"]["credential_pool"] is runtime_kwargs["credential_pool"]
+        assert route["runtime"]["credential_pool"] is fake_pool
 
 
 # ---------------------------------------------------------------------------
-# 4 & 5. Eager fallback deferred/fires based on credential pool
+# 3 & 4. Eager fallback deferred/fires based on credential pool
 # ---------------------------------------------------------------------------
 
 class TestEagerFallbackWithPool:
@@ -251,11 +135,11 @@ class TestEagerFallbackWithPool:
 
 
 # ---------------------------------------------------------------------------
-# 6. Full 429 rotation cycle via _recover_with_credential_pool
+# 5. Full 429 rotation cycle via _recover_with_credential_pool
 # ---------------------------------------------------------------------------
 
 class TestPoolRotationCycle:
-    """Verify the immediate-rotate → exhaust flow in _recover_with_credential_pool."""
+    """Verify the retry-same → rotate → exhaust flow in _recover_with_credential_pool."""
 
     def _make_agent_with_pool(self, pool_entries=3):
         from run_agent import AIAgent
@@ -289,25 +173,41 @@ class TestPoolRotationCycle:
 
         return agent, pool, entries
 
-    def test_first_429_rotates_to_next(self):
-        """First 429 should immediately rotate to next credential."""
+    def test_first_429_sets_retry_flag_no_rotation(self):
+        """First 429 should just set has_retried_429=True, no rotation."""
         agent, pool, _ = self._make_agent_with_pool(3)
         recovered, has_retried = agent._recover_with_credential_pool(
             status_code=429, has_retried_429=False
         )
+        assert recovered is False
+        assert has_retried is True
+        pool.mark_exhausted_and_rotate.assert_not_called()
+
+    def test_second_429_rotates_to_next(self):
+        """Second consecutive 429 should rotate to next credential."""
+        agent, pool, entries = self._make_agent_with_pool(3)
+        recovered, has_retried = agent._recover_with_credential_pool(
+            status_code=429, has_retried_429=True
+        )
         assert recovered is True
-        assert has_retried is False
+        assert has_retried is False  # reset after rotation
         pool.mark_exhausted_and_rotate.assert_called_once_with(status_code=429, error_context=None)
-        agent._swap_credential.assert_called_once()
+        agent._swap_credential.assert_called_once_with(entries[1])
 
     def test_pool_exhaustion_returns_false(self):
         """When all credentials exhausted, recovery should return False."""
         agent, pool, _ = self._make_agent_with_pool(1)
-        recovered, has_retried = agent._recover_with_credential_pool(
+        # First 429 sets flag
+        _, has_retried = agent._recover_with_credential_pool(
             status_code=429, has_retried_429=False
         )
+        assert has_retried is True
+
+        # Second 429 tries to rotate but pool is exhausted (only 1 entry)
+        recovered, _ = agent._recover_with_credential_pool(
+            status_code=429, has_retried_429=True
+        )
         assert recovered is False
-        assert has_retried is False
 
     def test_402_immediate_rotation(self):
         """402 (billing) should immediately rotate, no retry-first."""

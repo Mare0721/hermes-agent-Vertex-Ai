@@ -220,23 +220,6 @@ class TestDocumentDownloadBlock:
         assert "# Title" in event.text
 
     @pytest.mark.asyncio
-    async def test_markdown_resolved_suffix_is_supported(self, adapter):
-        content = b"# Patched\nResolved output"
-        file_obj = _make_file_obj(content)
-        doc = _make_document(
-            file_name="report.md.resolved", mime_type="text/plain",
-            file_size=len(content), file_obj=file_obj,
-        )
-        msg = _make_message(document=doc)
-        update = _make_update(msg)
-
-        await adapter._handle_media_message(update, MagicMock())
-        event = adapter.handle_message.call_args[0][0]
-        assert len(event.media_urls) == 1
-        assert event.media_types == ["text/plain"]
-        assert "Resolved output" in (event.text or "")
-
-    @pytest.mark.asyncio
     async def test_caption_preserved_with_injection(self, adapter):
         content = b"file text"
         file_obj = _make_file_obj(content)
